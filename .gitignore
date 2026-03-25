@@ -1,1 +1,19 @@
+# Build output
+build/
+
+# Generated config
+sdkconfig
+sdkconfig.old
+
+# Python
 __pycache__/
+*.py[cod]
+
+# IDE
+.vscode/
+.clangd/
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
