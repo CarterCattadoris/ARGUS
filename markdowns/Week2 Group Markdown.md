@@ -52,13 +52,13 @@ frame_bytes = buffer.tobytes()
 socketio.emit('frame', frame_bytes)
 ```
 
-4. Ran the Flask server and connected from the laptop browser at `http://<pi-ip>:5000`.
+4. Ran the Flask server and connected from the laptop browser at `http://127.0.0.1:5000`.
 
 ### Output
 
-> **[PLACEHOLDER: Screenshot of browser dashboard showing live webcam feed]**
+>![[web-dashboard-photo-3-25.png]]
+>
 
-> **[PLACEHOLDER: Terminal output showing Flask server running and client connected]**
 
 ---
 
@@ -108,28 +108,19 @@ sock.sendto(cmd.encode(), ("<esp32-ip>", 4210))
 
 ### Output
 
-> **[PLACEHOLDER: Serial monitor screenshot showing received UDP packets and PWM values]**
+> **![[Monitor_output_esp_1.png]]**
 
-
----
-
-## 3. Jon-Micheal — Dashboard Controls Groundwork
-
-**Owner: Jon-Micheal Gonzalez**
-
-Began laying out the manual drive controls section of the dashboard UI (keyboard bindings and on-screen button layout) in preparation for Week 3 integration with the ESP32 firmware.
-
-> **[PLACEHOLDER: Screenshot or code snippet of controls UI in progress]**
 
 ---
 
 ## Progress vs. Plan
 
-|Planned (Week 2)|Status|
-|---|---|
-|CV pipeline: camera calibration, marker tracking, coordinate mapping|⏳ Deferred to Week 3|
-|Flask dashboard with live video feed|✅ Complete|
-|ESP32 firmware: UDP listener to motor PWM (bench tested)|✅ Complete|
+| Planned (Week 2)                                                     | Status               |
+| -------------------------------------------------------------------- | -------------------- |
+| CV pipeline: camera calibration, marker tracking, coordinate mapping | ⏳ Deferred to Week 3 |
+| Flask dashboard with live video feed                                 | ✅ Complete           |
+| ESP32 firmware: UDP listener to motor PWM (bench tested)             | ✅ Complete           |
+|                                                                      |                      |
 
 Camera calibration and ArUco coordinate mapping were deprioritized this week to ensure the communication layer between the Pi and ESP32 was solid before chassis assembly begins in Week 3.
 
