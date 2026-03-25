@@ -110,7 +110,6 @@ sock.sendto(cmd.encode(), ("<esp32-ip>", 4210))
 
 > **[PLACEHOLDER: Serial monitor screenshot showing received UDP packets and PWM values]**
 
-> **[PLACEHOLDER: Photo of ESP32-S3 on bench with L298N wired up during test]**
 
 ---
 
