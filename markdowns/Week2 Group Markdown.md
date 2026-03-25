@@ -62,54 +62,61 @@ socketio.emit('frame', frame_bytes)
 
 ---
 
-## 2. ESP32-S3 UDP Firmware Bench Test
+## 2. ESP32-S3 Firmware Development & Bench Test
 
-**Owner: Lucas Le**
+Owner: Carter
 
-Wrote and tested the ESP32-S3 firmware to listen for UDP motor command packets over WiFi and translate them to PWM signals for the L298N motor driver. Tested on the bench without the chassis assembled.
+Set up the ESP-IDF v6.0 development environment on Linux Mint and wrote modular ESP32-S3 firmware in C. The firmware connects to WiFi, listens for UDP motor command packets, parses JSON payloads, and stores them in a thread-safe shared command struct using FreeRTOS mutexes.
+Environment Setup
 
-### Steps
+Installed ESP-IDF v6.0 via Espressif Installation Manager (EIM) on Linux Mint.
+Configured the toolchain for the ESP32-S3 target and verified the build/flash/monitor workflow over USB-Serial/JTAG (/dev/ttyACM0).
+Built and flashed a "Hello from ARGUS" test to confirm the full toolchain was operational.
 
-1. Flashed firmware to ESP32-S3 using Arduino IDE. The device joins the local WiFi network and opens a UDP socket on port `4210`.
-    
-2. The firmware parses incoming JSON motor commands:
-    
 
-```cpp
-// Expected packet format
-// {"left": 0.75, "right": 0.75, "dir": "fwd"}
 
-StaticJsonDocument<128> doc;
-deserializeJson(doc, packet);
-float left  = doc["left"];
-float right = doc["right"];
-String dir  = doc["dir"].as<String>();
-```
+### WiFi Station Mode
 
-3. Translates to PWM output on L298N enable pins:
+Implemented WiFi station mode with automatic connection and retry logic. The ESP32-S3 connects to the lab WiFi network and prints its assigned IP address on success.
+Registered event handlers for WiFi start, disconnect (with retry up to 5 attempts), and IP assignment — modeled after ESP-IDF's station example.
 
-```cpp
-analogWrite(ENA, (int)(left  * 255));
-analogWrite(ENB, (int)(right * 255));
-digitalWrite(IN1, dir == "fwd" ? HIGH : LOW);
-digitalWrite(IN2, dir == "fwd" ? LOW  : HIGH);
-```
 
-4. Sent test packets from the Pi using Python to verify correct behavior:
+![[Monitor_output_esp_1.png]]
 
-```python
-import socket, json
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-cmd = json.dumps({"left": 0.6, "right": 0.6, "dir": "fwd"})
-sock.sendto(cmd.encode(), ("<esp32-ip>", 4210))
-```
+### UDP Listener & JSON Command Parsing
 
-5. Verified the 500ms failsafe: if no command is received within 500ms, motors stop automatically.
+Created a FreeRTOS task for UDP reception on port 9876. The task opens a socket, binds, and loops on recvfrom() to receive incoming packets.
+Integrated the cJSON library to parse incoming motor command packets in the format:
 
-### Output
+json{"left": 0.5, "right": 0.7, "dir": 1}
 
-> **![[Monitor_output_esp_1.png]]**
+Parsed values are stored in a shared motor_cmd_t struct protected by a FreeRTOS mutex, along with a microsecond timestamp for failsafe timeout tracking.
+Tested by sending UDP packets from a laptop using a Python script:
 
+pythonimport socket, json
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(json.dumps({"left": 0.5, "right": 0.7, "dir": 1}).encode(), ("10.144.113.116", 9876))
+
+Terminal Output:
+I (1659) wifi: Connected — IP: 10.144.113.116
+I (6039) udp_listener: [10.144.113.51:36767] {"left": 0.5, "right": 0.7, "dir": 1}
+I (6039) udp_listener: CMD: L=0.50 R=0.70 D=1
+
+
+### Project Structure
+
+Organized firmware into modular files for maintainability:
+
+Embedded/
+├── CMakeLists.txt
+├── main/
+│   ├── CMakeLists.txt
+│   ├── main.c          // app_main, task creation
+│   ├── wifi.c / wifi.h // WiFi station init, event handler
+│   ├── udp.c / udp.h   // UDP listener task, JSON parsing
+│   └── command.c / command.h  // Shared motor command state, mutex
+
+![[project_structure.png]]
 
 ---
 

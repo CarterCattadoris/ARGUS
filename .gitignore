@@ -1,9 +1,14 @@
+
 # Build output
 build/
 
 # Generated config
 sdkconfig
 sdkconfig.old
+
+# Managed components (downloaded by component manager)
+managed_components/
+dependencies.lock
 
 # Python
 __pycache__/

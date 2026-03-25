@@ -1,10 +1,18 @@
 #ifndef COMMAND_H
 #define COMMAND_H
 
-void command_init(void);
-void command_update(void);
-void command_get(void);
-void command_get_timestamp(void);
+#include <stdint.h>
 
+typedef struct {
+    float left;
+    float right;
+    int dir;
+    int64_t timestamp;
+} motor_cmd_t;
+
+void command_init(void);
+void command_update(float left, float right, int dir, int64_t timestamp);
+void command_get(motor_cmd_t *out);
+int64_t command_get_timestamp(void);
 
 #endif
