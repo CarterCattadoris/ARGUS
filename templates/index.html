@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARGUS</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --video-bg: #0f1117;
+    --border: #e2e5ea;
+    --border-light: #eef0f3;
+    --text: #1a1d23;
+    --text-secondary: #000000;
+    --text-tertiary: #000000;
+    --accent: #2563eb;
+    --accent-bg: #eff6ff;
+    --green: #16a34a;
+    --green-bg: #f0fdf4;
+    --amber: #d97706;
+    --red: #dc2626;
+    --sidebar-bg: rgba(255, 255, 255, 0.55);
+    --sidebar-border: rgba(226, 229, 234, 0.5);
+    --panel-border: rgba(226, 229, 234, 0.35);
+    --sidebar-w: 280px;
+    --font: 'DM Sans', -apple-syexistem, sans-serif;
+    --mono: 'JetBrains Mono', monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    height: 100vh; width: 100vw;
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: 48px 1fr;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg); z-index: 20;
+  }
+  .nav-left { display: flex; align-items: center; gap: 16px; }
+  .logo { font-family: var(--mono); font-weight: 500; font-size: 14px; letter-spacing: 2px; }
+  .nav-divider { width: 1px; height: 20px; background: var(--border); }
+  .connection-status { display: flex; align-items: center; gap: 12px; }
+  .conn-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .conn-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); transition: background 0.3s; }
+  .conn-dot.ok { background: var(--green); }
+  .conn-dot.warn { background: var(--amber); }
+  .nav-right { display: flex; align-items: center; gap: 16px; }
+  .fps, .clock { font-family: var(--mono); font-size: 12px; color: var(--text-tertiary); }
+
+  main { position: relative; overflow: hidden; }
+
+  /* ── Video Area ── */
+  .video-area {
+    position: absolute; inset: 0;
+    background: var(--video-bg);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #videoElement {
+    width: 100%; height: 100%;
+    object-fit: contain;
+    background: #000;
+  }
+  .video-placeholder-text {
+    position: absolute;
+    font-size: 13px; color: var(--text-tertiary);
+    user-select: none; pointer-events: none;
+  }
+
+  .target-cursor-active {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='32' viewBox='0 0 48 32'%3E%3Cpath d='M3 10 L3 3 L12 3' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M36 3 L45 3 L45 10' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M45 22 L45 29 L36 29' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M12 29 L3 29 L3 22' stroke='%23ffffff' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 24 16, crosshair;
+  }
+
+  .target-marker {
+    position: absolute;
+    width: 72px; height: 44px;
+    transform: translate(-50%, -50%);
+    pointer-events: none; z-index: 8;
+    animation: targetPulse 2s ease-in-out infinite;
+  }
+  @keyframes targetPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  /* ── Draw Canvas ── */
+  .draw-canvas {
+    position: absolute; inset: 0;
+    z-index: 5; cursor: default; display: none;
+  }
+  .draw-canvas.active { display: block; cursor: crosshair; }
+  .draw-canvas svg { width: 100%; height: 100%; }
+  .drawn-path {
+    fill: none; stroke: var(--accent);
+    stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round;
+    opacity: 0.7;
+  }
+
+  /* ── Overlays ── */
+  .overlay-heading {
+    position: absolute; top: 16px;
+    left: calc(50% - var(--sidebar-w) / 2);
+    transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 14px;
+    background: rgba(0,0,0,0.65);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+    backdrop-filter: blur(6px); z-index: 10;
+    transition: left 0.3s ease;
+  }
+  .heading-label { font-family: var(--mono); font-size: 12px; color: rgba(255,255,255,0.6); }
+  .heading-value { font-family: var(--mono); font-size: 13px; font-weight: 500; color: #fff; }
+
+  .overlay-distance {
+    position: absolute; bottom: 72px;
+    left: calc(50% - var(--sidebar-w) / 2);
+    transform: translateX(-50%);
+    text-align: center; z-index: 10;
+    transition: left 0.3s ease;
+  }
+  .dist-value { font-family: var(--mono); font-size: 32px; font-weight: 500; line-height: 1; color: #fff; }
+  .dist-unit { font-size: 13px; font-weight: 400; color: rgba(255,255,255,0.6); margin-left: 2px; }
+  .dist-label { font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 4px; }
+
+  body.sidebar-hidden .overlay-heading,
+  body.sidebar-hidden .overlay-distance { left: 50%; }
+
+  /* ── Toast Notifications ── */
+  .toast-container {
+    position: absolute; top: 56px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 100; display: flex; flex-direction: column; gap: 8px;
+    pointer-events: none;
+  }
+  .toast {
+    padding: 8px 16px;
+    background: rgba(0,0,0,0.8);
+    color: #fff; font-size: 12px;
+    border-radius: 6px; backdrop-filter: blur(8px);
+    animation: toastIn 0.3s ease, toastOut 0.3s ease 2.7s forwards;
+    pointer-events: auto;
+  }
+  .toast.error { border-left: 3px solid var(--red); }
+  .toast.success { border-left: 3px solid var(--green); }
+  .toast.info { border-left: 3px solid var(--accent); }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes toastOut { to { opacity: 0; transform: translateY(-10px); } }
+
+  /* ── Bottom Bar ── */
+  .bottom-bar {
+    position: absolute; bottom: 16px; left: 16px;
+    right: calc(var(--sidebar-w) + 16px);
+    display: flex; align-items: center; justify-content: space-between;
+    z-index: 10;
+    transition: right 0.3s ease;
+  }
+  body.sidebar-hidden .bottom-bar { right: 16px; }
+
+  .bottom-left-tools { display: flex; flex-direction: column; gap: 6px; }
+
+  .tool-btn {
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 14px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+    font-family: var(--font); font-size: 12px;
+    color: rgba(255,255,255,0.7); cursor: pointer;
+    transition: all 0.15s; backdrop-filter: blur(6px);
+  }
+  .tool-btn:hover { border-color: var(--accent); color: #fff; }
+  .tool-btn.active { background: rgba(37,99,235,0.3); border-color: var(--accent); color: #fff; }
+  .tool-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+  .autopilot-section {
+    display: flex; align-items: center; gap: 12px;
+    padding: 6px 14px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+    backdrop-filter: blur(6px);
+  }
+  .ap-label { font-size: 12px; color: rgba(255,255,255,0.5); }
+  .ap-toggle {
+    position: relative; width: 44px; height: 24px;
+    background: rgba(255,255,255,0.2); border: none; border-radius: 12px;
+    cursor: pointer; transition: background 0.2s;
+  }
+  .ap-toggle::after {
+    content: ''; position: absolute; top: 3px; left: 3px;
+    width: 18px; height: 18px;
+    background: white; border-radius: 50%;
+    transition: transform 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+  .ap-toggle.engaged { background: var(--green); }
+  .ap-toggle.engaged::after { transform: translateX(20px); }
+  .ap-status { font-family: var(--mono); font-size: 11px; padding: 4px 10px; border-radius: 4px; }
+  .ap-status.off { color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.05); }
+  .ap-status.on { color: var(--green); background: rgba(22,163,74,0.15); }
+
+  /* ── Drive indicator ── */
+  .drive-indicator {
+    position: absolute; bottom: 16px; left: 50%;
+    transform: translateX(-50%);
+    display: none; align-items: center; gap: 8px;
+    padding: 6px 14px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+    backdrop-filter: blur(6px); z-index: 11;
+    font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,0.7);
+  }
+  .drive-indicator.active { display: flex; }
+  .key-indicator {
+    width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid rgba(255,255,255,0.2); border-radius: 4px;
+    font-size: 10px; transition: all 0.1s;
+  }
+  .key-indicator.pressed { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    position: absolute; top: 0; right: 0; bottom: 0;
+    width: var(--sidebar-w);
+    background: var(--sidebar-bg);
+    backdrop-filter: blur(20px);
+    border-left: 1px solid var(--sidebar-border);
+    display: flex; flex-direction: column;
+    overflow-y: auto; z-index: 15;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+  }
+  body.sidebar-hidden .sidebar {
+    transform: translateX(100%); opacity: 0; pointer-events: none;
+  }
+
+  .sidebar-toggle {
+    position: absolute; top: 8px; right: 8px;
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    background: none; border: none;
+    cursor: pointer; z-index: 25;
+    color: var(--text-tertiary); border-radius: 6px;
+    transition: all 0.15s;
+  }
+  .sidebar-toggle:hover { background: rgba(0,0,0,0.04); color: var(--text-secondary); }
+  .sidebar-toggle svg { width: 18px; height: 18px; }
+  body.sidebar-hidden .sidebar-toggle {
+    right: 8px; top: 8px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.15);
+    backdrop-filter: blur(6px);
+    color: rgba(255,255,255,0.6);
+  }
+
+  .panel { padding: 16px 20px; border-bottom: 1px solid var(--panel-border); }
+  .panel:first-child { padding-top: 44px; }
+  .panel-title {
+    font-size: 10px; font-weight: 600; color: var(--text-tertiary);
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px;
+  }
+
+  .telem-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .telem-item { display: flex; flex-direction: column; gap: 2px; }
+  .telem-item-label { font-size: 11px; color: var(--text-tertiary); }
+  .telem-item-value { font-family: var(--mono); font-size: 16px; font-weight: 500; }
+  .telem-item-unit { font-size: 11px; font-weight: 400; color: var(--text-tertiary); margin-left: 1px; }
+
+  .motor-bars { display: flex; gap: 20px; }
+  .motor-bar-item { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .motor-bar-header { display: flex; justify-content: space-between; align-items: baseline; }
+  .motor-bar-label { font-size: 11px; color: var(--text-tertiary); }
+  .motor-bar-value { font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  .motor-bar-track { width: 100%; height: 6px; background: rgba(0,0,0,0.06); border-radius: 3px; overflow: hidden; }
+  .motor-bar-fill { height: 100%; background: var(--text); border-radius: 3px; transition: width 0.1s; }
+  .motor-dir { font-family: var(--mono); font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
+
+  .pid-row { display: flex; gap: 12px; margin-bottom: 10px; }
+  .pid-item { flex: 1; padding: 8px 10px; background: rgba(247,248,250,0.5); border-radius: 6px; }
+  .pid-item-label { font-family: var(--mono); font-size: 10px; color: var(--text-tertiary); }
+  .pid-item-value { font-family: var(--mono); font-size: 14px; font-weight: 500; margin-top: 2px; }
+
+  .pid-error-section { display: flex; flex-direction: column; gap: 4px; }
+  .pid-error-header { display: flex; justify-content: space-between; }
+  .pid-error-label { font-size: 11px; color: var(--text-tertiary); }
+  .pid-error-value { font-family: var(--mono); font-size: 11px; color: var(--text-secondary); }
+  .pid-error-track { width: 100%; height: 4px; background: rgba(0,0,0,0.06); border-radius: 2px; position: relative; }
+  .pid-error-center { position: absolute; left: 50%; top: 0; width: 1px; height: 100%; background: var(--border); }
+  .pid-error-fill {
+    position: absolute; top: 0; height: 100%;
+    background: var(--amber); border-radius: 2px;
+    transition: left 0.1s, width 0.1s;
+  }
+
+  .sidebar-spacer { flex: 1; }
+  .sidebar-footer { padding: 12px 20px; border-top: 1px solid var(--panel-border); }
+  .shortcut-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; }
+  .shortcut-action { font-size: 11px; color: var(--text-tertiary); }
+  .shortcut-keys {
+    font-family: var(--mono); font-size: 10px; color: var(--text-tertiary);
+    padding: 2px 6px; background: rgba(247,248,250,0.5);
+    border: 1px solid rgba(226,229,234,0.4); border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+
+  <header>
+    <div class="nav-left">
+      <div class="logo">ARGUS</div>
+      <div class="nav-divider"></div>
+      <div class="connection-status">
+        <div class="conn-item"><div class="conn-dot" id="connESP32"></div>ESP32</div>
+        <div class="conn-item"><div class="conn-dot" id="connCamera"></div>Camera</div>
+        <div class="conn-item"><div class="conn-dot" id="connIMU"></div>IMU</div>
+      </div>
+    </div>
+    <div class="nav-right">
+      <div class="fps" id="fpsDisplay">— fps</div>
+      <div class="clock" id="clock"></div>
+    </div>
+  </header>
+
+  <main id="mainArea">
+    <div class="video-area" id="videoArea">
+      <!-- Video element for WebRTC or MJPEG fallback -->
+      <video id="videoElement" autoplay playsinline muted></video>
+      <img id="mjpegFallback" style="display:none; width:100%; height:100%; object-fit:contain;" />
+      <div class="video-placeholder-text" id="videoPlaceholder">Connecting to video feed...</div>
+    </div>
+
+    <div class="draw-canvas" id="drawCanvas">
+      <svg id="drawSvg">
+        <path id="drawnPath" class="drawn-path" d=""/>
+      </svg>
+    </div>
+
+    <div class="overlay-heading">
+      <span class="heading-label">HDG</span>
+      <span class="heading-value" id="headingOverlay">—°</span>
+    </div>
+    <div class="overlay-distance" id="distanceOverlay" style="display:none">
+      <div class="dist-value"><span id="distValue">—</span><span class="dist-unit">m</span></div>
+      <div class="dist-label">to target</div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <div class="bottom-bar">
+      <div class="bottom-left-tools">
+        <button class="tool-btn" id="drawPathBtn">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 12 C4 8, 6 4, 8 6 S12 12, 14 4"/>
+          </svg>
+          Draw path
+        </button>
+        <button class="tool-btn" id="targetBtn">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2"/>
+            <line x1="8" y1="0.5" x2="8" y2="3"/><line x1="8" y1="13" x2="8" y2="15.5"/>
+            <line x1="0.5" y1="8" x2="3" y2="8"/><line x1="13" y1="8" x2="15.5" y2="8"/>
+          </svg>
+          Set target
+        </button>
+      </div>
+      <div class="autopilot-section">
+        <span class="ap-label">Autopilot</span>
+        <button class="ap-toggle" id="apToggle"></button>
+        <span class="ap-status off" id="apStatus">OFF</span>
+      </div>
+    </div>
+
+    <!-- Drive key indicators -->
+    <div class="drive-indicator" id="driveIndicator">
+      <div class="key-indicator" id="keyW">W</div>
+      <div style="display:flex; gap:2px;">
+        <div class="key-indicator" id="keyA">A</div>
+        <div class="key-indicator" id="keyS">S</div>
+        <div class="key-indicator" id="keyD">D</div>
+      </div>
+    </div>
+
+    <button class="sidebar-toggle" id="sidebarToggle" title="Toggle panel">
+      <svg id="eyeOpen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+      <svg id="eyeClosed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+        <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/>
+        <line x1="1" y1="1" x2="23" y2="23"/>
+      </svg>
+    </button>
+
+    <div class="sidebar">
+      <div class="panel">
+        <div class="panel-title">Telemetry</div>
+        <div class="telem-grid">
+          <div class="telem-item">
+            <div class="telem-item-label">Position X</div>
+            <div class="telem-item-value" id="telPosX">—<span class="telem-item-unit">m</span></div>
+          </div>
+          <div class="telem-item">
+            <div class="telem-item-label">Position Y</div>
+            <div class="telem-item-value" id="telPosY">—<span class="telem-item-unit">m</span></div>
+          </div>
+          <div class="telem-item">
+            <div class="telem-item-label">Speed</div>
+            <div class="telem-item-value" id="telSpeed">—<span class="telem-item-unit">m/s</span></div>
+          </div>
+          <div class="telem-item">
+            <div class="telem-item-label">Heading</div>
+            <div class="telem-item-value" id="telHeading">—<span class="telem-item-unit">°</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Motors</div>
+        <div class="motor-bars">
+          <div class="motor-bar-item">
+            <div class="motor-bar-header">
+              <span class="motor-bar-label">Left</span>
+              <span class="motor-bar-value" id="motorLeftVal">0.00</span>
+            </div>
+            <div class="motor-bar-track"><div class="motor-bar-fill" id="motorLeftBar" style="width:0%"></div></div>
+          </div>
+          <div class="motor-bar-item">
+            <div class="motor-bar-header">
+              <span class="motor-bar-label">Right</span>
+              <span class="motor-bar-value" id="motorRightVal">0.00</span>
+            </div>
+            <div class="motor-bar-track"><div class="motor-bar-fill" id="motorRightBar" style="width:0%"></div></div>
+          </div>
+        </div>
+        <div class="motor-dir" id="motorDir">Direction: —</div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">PID Controller</div>
+        <div class="pid-row">
+          <div class="pid-item"><div class="pid-item-label">Kp</div><div class="pid-item-value" id="pidKp">—</div></div>
+          <div class="pid-item"><div class="pid-item-label">Ki</div><div class="pid-item-value" id="pidKi">—</div></div>
+          <div class="pid-item"><div class="pid-item-label">Kd</div><div class="pid-item-value" id="pidKd">—</div></div>
+        </div>
+        <div class="pid-error-section">
+          <div class="pid-error-header">
+            <span class="pid-error-label">Steering error</span>
+            <span class="pid-error-value" id="pidErrorVal">0.00</span>
+          </div>
+          <div class="pid-error-track">
+            <div class="pid-error-center"></div>
+            <div class="pid-error-fill" id="pidErrorFill"></div>
+          </div>
+        </div>
+      </div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-footer">
+        <div class="shortcut-row"><span class="shortcut-action">Drive</span><span class="shortcut-keys">W A S D</span></div>
+        <div class="shortcut-row"><span class="shortcut-action">Autopilot</span><span class="shortcut-keys">Space</span></div>
+        <div class="shortcut-row"><span class="shortcut-action">Set target</span><span class="shortcut-keys">T</span></div>
+        <div class="shortcut-row"><span class="shortcut-action">Draw path</span><span class="shortcut-keys">P</span></div>
+        <div class="shortcut-row"><span class="shortcut-action">Stop</span><span class="shortcut-keys">Esc</span></div>
+      </div>
+    </div>
+  </main>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// ARGUS Dashboard — Client-side Logic
+// ═══════════════════════════════════════════════════════
+
+// ── SocketIO Connection ──
+const socket = io({ transports: ['websocket'], upgrade: false });
+
+// ── State ──
+let autopilotEngaged = false;
+let targetActive = false;
+let drawActive = false;
+let sidebarVisible = true;
+let targetMarker = null;
+let webrtcConnected = false;
+
+// Drive state
+const keys = { w: false, a: false, s: false, d: false };
+const DRIVE_POWER = 0.65;
+const TURN_POWER = 0.50;
+let driveInterval = null;
+
+// Draw state
+let isDrawing = false;
+let pathPoints = [];
+
+// ── Elements ──
+const $ = id => document.getElementById(id);
+
+// ── Clock ──
+function updateClock() {
+  $('clock').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Toast Notifications ──
+function toast(message, type = 'info') {
+  const container = $('toastContainer');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = message;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ═══════════════════════════════════════════════════════
+// VIDEO — WebRTC with MJPEG fallback
+// ═══════════════════════════════════════════════════════
+
+async function initWebRTC() {
+  try {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+
+    pc.addTransceiver('video', { direction: 'recvonly' });
+
+    pc.ontrack = (event) => {
+      const video = $('videoElement');
+      video.srcObject = event.streams[0];
+      video.style.display = 'block';
+      $('videoPlaceholder').style.display = 'none';
+      webrtcConnected = true;
+      console.log('[WebRTC] Video track received');
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit('webrtc_ice_candidate', {
+          candidate: event.candidate.candidate,
+          sdpMid: event.candidate.sdpMid,
+          sdpMLineIndex: event.candidate.sdpMLineIndex,
+        });
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC] State: ${pc.connectionState}`);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        webrtcConnected = false;
+        fallbackToMJPEG();
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    socket.emit('webrtc_offer', {
+      sdp: pc.localDescription.sdp,
+      type: pc.localDescription.type,
+    });
+
+    socket.on('webrtc_answer', async (data) => {
+      await pc.setRemoteDescription(new RTCSessionDescription(data));
+      console.log('[WebRTC] Answer received, connection establishing...');
+    });
+
+    socket.on('webrtc_error', (data) => {
+      console.warn('[WebRTC] Error:', data.error);
+      fallbackToMJPEG();
+    });
+
+    // Timeout: if no video in 5s, fall back
+    setTimeout(() => {
+      if (!webrtcConnected) fallbackToMJPEG();
+    }, 5000);
+
+  } catch (e) {
+    console.error('[WebRTC] Init failed:', e);
+    fallbackToMJPEG();
+  }
+}
+
+function fallbackToMJPEG() {
+  if (webrtcConnected) return;
+  console.log('[Video] Falling back to MJPEG');
+  const video = $('videoElement');
+  video.style.display = 'none';
+  const img = $('mjpegFallback');
+  img.src = '/video_feed';
+  img.style.display = 'block';
+  $('videoPlaceholder').style.display = 'none';
+  toast('Using MJPEG fallback (WebRTC unavailable)', 'info');
+}
+
+// ═══════════════════════════════════════════════════════
+// TELEMETRY
+// ═══════════════════════════════════════════════════════
+
+socket.on('telemetry', (data) => {
+  // Position
+  if (data.position) {
+    $('telPosX').innerHTML = `${data.position.x.toFixed(3)}<span class="telem-item-unit">m</span>`;
+    $('telPosY').innerHTML = `${data.position.y.toFixed(3)}<span class="telem-item-unit">m</span>`;
+  }
+
+  // Speed
+  $('telSpeed').innerHTML = `${data.speed.toFixed(2)}<span class="telem-item-unit">m/s</span>`;
+
+  // Heading
+  if (data.heading !== null) {
+    $('telHeading').innerHTML = `${data.heading.toFixed(1)}<span class="telem-item-unit">°</span>`;
+    $('headingOverlay').textContent = `${Math.round(data.heading)}°`;
+  }
+
+  // Distance to target
+  if (data.distance_to_target !== null) {
+    $('distanceOverlay').style.display = '';
+    $('distValue').textContent = data.distance_to_target.toFixed(2);
+  } else {
+    $('distanceOverlay').style.display = 'none';
+  }
+
+  // Motors
+  $('motorLeftVal').textContent = data.motors.left.toFixed(2);
+  $('motorRightVal').textContent = data.motors.right.toFixed(2);
+  $('motorLeftBar').style.width = (data.motors.left * 100) + '%';
+  $('motorRightBar').style.width = (data.motors.right * 100) + '%';
+  $('motorDir').textContent = `Direction: ${data.motors.dir}`;
+
+  // PID
+  $('pidKp').textContent = data.pid.kp.toFixed(2);
+  $('pidKi').textContent = data.pid.ki.toFixed(2);
+  $('pidKd').textContent = data.pid.kd.toFixed(2);
+  $('pidErrorVal').textContent = data.pid.steering_error.toFixed(3);
+
+  // PID error bar visualization
+  const errorNorm = Math.max(-1, Math.min(1, data.pid.steering_error));
+  const errorFill = $('pidErrorFill');
+  if (errorNorm >= 0) {
+    errorFill.style.left = '50%';
+    errorFill.style.width = (errorNorm * 50) + '%';
+  } else {
+    errorFill.style.left = (50 + errorNorm * 50) + '%';
+    errorFill.style.width = (Math.abs(errorNorm) * 50) + '%';
+  }
+
+  // FPS
+  $('fpsDisplay').textContent = `${data.fps} fps`;
+
+  // Connection status
+  $('connESP32').className = 'conn-dot' + (data.connection.esp32 ? ' ok' : '');
+  $('connCamera').className = 'conn-dot' + (data.connection.camera ? ' ok' : '');
+  $('connIMU').className = 'conn-dot' + (data.connection.imu ? ' ok' : ' warn');
+
+  // Autopilot state sync
+  if (data.autopilot !== autopilotEngaged) {
+    autopilotEngaged = data.autopilot;
+    updateAutopilotUI();
+  }
+});
+
+socket.on('connection_status', (data) => {
+  $('connESP32').className = 'conn-dot' + (data.esp32 ? ' ok' : '');
+  $('connCamera').className = 'conn-dot' + (data.camera ? ' ok' : '');
+  $('connIMU').className = 'conn-dot' + (data.imu ? ' ok' : ' warn');
+});
+
+socket.on('error', (data) => {
+  toast(data.msg, 'error');
+});
+
+socket.on('connect', () => {
+  toast('Connected to ground station', 'success');
+  initWebRTC();
+});
+
+socket.on('disconnect', () => {
+  toast('Disconnected from ground station', 'error');
+});
+
+// ═══════════════════════════════════════════════════════
+// MANUAL DRIVE (WASD)
+// ═══════════════════════════════════════════════════════
+
+function computeDriveCommand() {
+  let left = 0, right = 0, dir = 'fwd';
+
+  if (keys.w) { left += DRIVE_POWER; right += DRIVE_POWER; }
+  if (keys.s) { left += DRIVE_POWER; right += DRIVE_POWER; dir = 'rev'; }
+  if (keys.a) { left -= TURN_POWER; right += TURN_POWER; }
+  if (keys.d) { left += TURN_POWER; right -= TURN_POWER; }
+
+  left = Math.max(0, Math.min(1, Math.abs(left)));
+  right = Math.max(0, Math.min(1, Math.abs(right)));
+
+  return { left, right, dir };
+}
+
+function sendDriveCommand() {
+  const anyKey = keys.w || keys.a || keys.s || keys.d;
+  if (!anyKey) {
+    socket.emit('manual_stop');
+    return;
+  }
+  const cmd = computeDriveCommand();
+  socket.emit('manual_drive', cmd);
+}
+
+function updateDriveIndicator() {
+  const anyKey = keys.w || keys.a || keys.s || keys.d;
+  $('driveIndicator').className = 'drive-indicator' + (anyKey ? ' active' : '');
+  $('keyW').className = 'key-indicator' + (keys.w ? ' pressed' : '');
+  $('keyA').className = 'key-indicator' + (keys.a ? ' pressed' : '');
+  $('keyS').className = 'key-indicator' + (keys.s ? ' pressed' : '');
+  $('keyD').className = 'key-indicator' + (keys.d ? ' pressed' : '');
+}
+
+document.addEventListener('keydown', (e) => {
+  const k = e.key.toLowerCase();
+
+  // Drive keys
+  if (['w', 'a', 's', 'd'].includes(k) && !autopilotEngaged) {
+    e.preventDefault();
+    if (!keys[k]) {
+      keys[k] = true;
+      updateDriveIndicator();
+      // Start sending at 20Hz
+      if (!driveInterval) {
+        sendDriveCommand();
+        driveInterval = setInterval(sendDriveCommand, 50);
+      }
+    }
+    return;
+  }
+
+  // Shortcuts
+  if (k === ' ') { e.preventDefault(); toggleAutopilot(); }
+  if (k === 't') toggleTarget();
+  if (k === 'p') toggleDraw();
+  if (k === 'escape') emergencyStop();
+});
+
+document.addEventListener('keyup', (e) => {
+  const k = e.key.toLowerCase();
+  if (['w', 'a', 's', 'd'].includes(k)) {
+    keys[k] = false;
+    updateDriveIndicator();
+    const anyKey = keys.w || keys.a || keys.s || keys.d;
+    if (!anyKey && driveInterval) {
+      clearInterval(driveInterval);
+      driveInterval = null;
+      socket.emit('manual_stop');
+    }
+  }
+});
+
+function emergencyStop() {
+  // Stop everything
+  keys.w = keys.a = keys.s = keys.d = false;
+  updateDriveIndicator();
+  if (driveInterval) { clearInterval(driveInterval); driveInterval = null; }
+  socket.emit('manual_stop');
+  if (autopilotEngaged) {
+    socket.emit('toggle_autopilot', { engage: false });
+    autopilotEngaged = false;
+    updateAutopilotUI();
+  }
+  toast('Emergency stop', 'error');
+}
+
+// ═══════════════════════════════════════════════════════
+// AUTOPILOT
+// ═══════════════════════════════════════════════════════
+
+function toggleAutopilot() {
+  const newState = !autopilotEngaged;
+  socket.emit('toggle_autopilot', { engage: newState });
+}
+
+socket.on('autopilot_state', (data) => {
+  autopilotEngaged = data.engaged;
+  updateAutopilotUI();
+  toast(data.engaged ? 'Autopilot engaged' : 'Autopilot disengaged',
+        data.engaged ? 'success' : 'info');
+});
+
+function updateAutopilotUI() {
+  $('apToggle').classList.toggle('engaged', autopilotEngaged);
+  const s = $('apStatus');
+  s.textContent = autopilotEngaged ? 'ON' : 'OFF';
+  s.className = 'ap-status ' + (autopilotEngaged ? 'on' : 'off');
+}
+
+$('apToggle').addEventListener('click', toggleAutopilot);
+
+// ═══════════════════════════════════════════════════════
+// SET TARGET
+// ═══════════════════════════════════════════════════════
+
+function toggleTarget() {
+  targetActive = !targetActive;
+  $('targetBtn').classList.toggle('active', targetActive);
+  $('videoArea').classList.toggle('target-cursor-active', targetActive);
+  if (targetActive) {
+    drawActive = false;
+    $('drawPathBtn').classList.remove('active');
+    $('drawCanvas').classList.remove('active');
+  }
+}
+
+$('targetBtn').addEventListener('click', toggleTarget);
+
+$('videoArea').addEventListener('click', (e) => {
+  if (!targetActive) return;
+
+  const rect = $('mainArea').getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+
+  // Remove old marker
+  if (targetMarker) targetMarker.remove();
+
+  // Place visual marker
+  const marker = document.createElement('div');
+  marker.className = 'target-marker';
+  marker.innerHTML = `<svg width="72" height="44" viewBox="0 0 72 44" fill="none">
+    <path d="M3 13 L3 3 L16 3" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M56 3 L69 3 L69 13" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M69 31 L69 41 L56 41" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M16 41 L3 41 L3 31" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+  marker.style.left = px + 'px';
+  marker.style.top = py + 'px';
+  $('mainArea').appendChild(marker);
+  targetMarker = marker;
+
+  // Send to backend
+  socket.emit('set_target', { px, py });
+  toggleTarget();
+});
+
+socket.on('target_confirmed', (data) => {
+  toast(`Target set: (${data.world_x.toFixed(2)}, ${data.world_y.toFixed(2)})m`, 'success');
+});
+
+// ═══════════════════════════════════════════════════════
+// DRAW PATH
+// ═══════════════════════════════════════════════════════
+
+function toggleDraw() {
+  drawActive = !drawActive;
+  $('drawPathBtn').classList.toggle('active', drawActive);
+  $('drawCanvas').classList.toggle('active', drawActive);
+  if (drawActive) {
+    targetActive = false;
+    $('targetBtn').classList.remove('active');
+    $('videoArea').classList.remove('target-cursor-active');
+    // Clear previous path
+    pathPoints = [];
+    $('drawnPath').setAttribute('d', '');
+  }
+}
+
+$('drawPathBtn').addEventListener('click', toggleDraw);
+
+const canvas = $('drawCanvas');
+const drawnPath = $('drawnPath');
+
+canvas.addEventListener('mousedown', (e) => {
+  if (!drawActive) return;
+  isDrawing = true;
+  pathPoints = [];
+  const rect = canvas.getBoundingClientRect();
+  pathPoints.push({ px: e.clientX - rect.left, py: e.clientY - rect.top });
+  drawnPath.setAttribute('d', `M ${pathPoints[0].px} ${pathPoints[0].py}`);
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  if (!isDrawing) return;
+  const rect = canvas.getBoundingClientRect();
+  pathPoints.push({ px: e.clientX - rect.left, py: e.clientY - rect.top });
+  let d = `M ${pathPoints[0].px} ${pathPoints[0].py}`;
+  for (let i = 1; i < pathPoints.length; i++) {
+    d += ` L ${pathPoints[i].px} ${pathPoints[i].py}`;
+  }
+  drawnPath.setAttribute('d', d);
+});
+
+canvas.addEventListener('mouseup', () => {
+  if (!isDrawing) return;
+  isDrawing = false;
+
+  if (pathPoints.length >= 2) {
+    // Send path to backend
+    socket.emit('set_waypoints', { points: pathPoints });
+  }
+
+  // Deactivate draw mode
+  drawActive = false;
+  $('drawPathBtn').classList.remove('active');
+  $('drawCanvas').classList.remove('active');
+});
+
+canvas.addEventListener('mouseleave', () => {
+  if (isDrawing) {
+    isDrawing = false;
+    if (pathPoints.length >= 2) {
+      socket.emit('set_waypoints', { points: pathPoints });
+    }
+    drawActive = false;
+    $('drawPathBtn').classList.remove('active');
+    $('drawCanvas').classList.remove('active');
+  }
+});
+
+socket.on('waypoints_confirmed', (data) => {
+  toast(`Path set: ${data.count} waypoints`, 'success');
+});
+
+// ═══════════════════════════════════════════════════════
+// SIDEBAR TOGGLE
+// ═══════════════════════════════════════════════════════
+
+function toggleSidebar() {
+  sidebarVisible = !sidebarVisible;
+  document.body.classList.toggle('sidebar-hidden', !sidebarVisible);
+  $('eyeOpen').style.display = sidebarVisible ? '' : 'none';
+  $('eyeClosed').style.display = sidebarVisible ? 'none' : '';
+}
+
+$('sidebarToggle').addEventListener('click', toggleSidebar);
+
+// ═══════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════
+
+// Start video after page loads
+window.addEventListener('load', () => {
+  // WebRTC will be initiated after socket connects
+});
+</script>
+
+</body>
+</html>
