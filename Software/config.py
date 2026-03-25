@@ -31,7 +31,7 @@ class Config:
 
     # ── ESP32 Communication ────────────────────
     ESP32_IP = "10.144.113.116"           # ← change to your ESP32's static IP
-    UDP_PORT = 4210                      # bidirectional: cmds out, IMU in
+    UDP_PORT = 9876                      # bidirectional: cmds out, IMU in
     FAILSAFE_TIMEOUT_MS = 500            # motors stop if no cmd in 500ms
     IMU_TIMEOUT_S = 2.0                  # mark IMU inactive after 2s silence
 

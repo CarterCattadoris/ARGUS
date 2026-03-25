@@ -80,26 +80,33 @@ class ESP32Comms:
     # ──────────────────────────────────────────
     # Send Motor Commands
     # ──────────────────────────────────────────
-    def send_motor_command(self, left, right, direction="fwd"):
+    def send_motor_command(self, left, right):
         """
         Send motor command to ESP32.
         Args:
-            left: 0.0 - 1.0 (left motor power)
-            right: 0.0 - 1.0 (right motor power)
-            direction: "fwd" or "rev"
+            left:  -1.0 (full reverse) to 1.0 (full forward)
+            right: -1.0 (full reverse) to 1.0 (full forward)
         """
         if self._sock is None:
             return False
 
-        cmd = {
-            "type": "motor",
-            "left": round(max(0.0, min(1.0, left)), 3),
-            "right": round(max(0.0, min(1.0, right)), 3),
-            "dir": direction,
-            "ts": int(time.time() * 1000),  # millisecond timestamp
-        }
+        # Clamp inputs to [-1, 1]
+        left  = max(-1.0, min(1.0, left))
+        right = max(-1.0, min(1.0, right))
 
-        return self._send(cmd)
+        # Derive direction from the dominant motor's sign.
+        # If both are zero, default to "fwd".
+        direction = "rev" if (left + right) < 0 else "fwd"
+
+        cmd = {
+            "left":  round(abs(left),  3),
+            "right": round(abs(right), 3),
+            "dir":   direction,
+            "ts":    int(time.time() * 1000),
+        }
+            pass
+
+    return self._send(cmd)
 
     def _send_heartbeat(self):
         """Send a heartbeat packet to detect ESP32 presence."""
