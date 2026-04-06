@@ -108,31 +108,13 @@ def video_feed():
                     + frame_bytes
                     + b"\r\n"
                 )
-            else:
-                time.sleep(0.03)
+            time.sleep(0.033) # rate limit to ~30 FPS
 
     return Response(
         generate(),
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
 
-
-# ──────────────────────────────────────────────
-# WebRTC Signaling (via SocketIO)
-# ──────────────────────────────────────────────
-@socketio.on("webrtc_offer")
-def handle_webrtc_offer(data):
-    log.info("WebRTC offer received from client")
-    answer = cv_pipeline.handle_webrtc_offer(data)
-    if answer:
-        emit("webrtc_answer", answer)
-    else:
-        emit("webrtc_error", {"error": "Failed to create WebRTC answer"})
-
-
-@socketio.on("webrtc_ice_candidate")
-def handle_ice_candidate(data):
-    cv_pipeline.add_ice_candidate(data)
 
 
 # ──────────────────────────────────────────────
@@ -224,10 +206,6 @@ def handle_scan_esp32():
 def handle_toggle_autopilot(data):
     engage = data.get("engage", False)
     with state_lock:
-        if engage and state["target"] is None and len(state["waypoints"]) == 0:
-            emit("error", {"msg": "Set a target or draw a path before engaging autopilot"})
-            return
-
         state["autopilot_engaged"] = engage
         if not engage:
             esp32.send_motor_command(0.0, 0.0)
@@ -324,6 +302,10 @@ def control_loop():
     fps_time = time.time()
     current_fps = 0.0
 
+    # IMU integration globals
+    global_yaw = None
+    last_yaw_time = time.time()
+
     while True:
         t_start = time.time()
 
@@ -333,23 +315,38 @@ def control_loop():
         # 2) Get latest IMU data from ESP32
         imu_data = esp32.get_imu_data()
 
-        # 3) Fuse heading: IMU primary, CV velocity vector as drift correction
-        heading = None
-        if imu_data and imu_data.get("yaw") is not None:
-            heading = imu_data["yaw"]
-        if detection and detection.get("velocity_heading") is not None:
-            if heading is not None:
-                cv_heading = detection["velocity_heading"]
-                heading = 0.9 * heading + 0.1 * cv_heading
-            else:
-                heading = detection["velocity_heading"]
-
-        # 4) Build current pose
+        # 3) Build current pose
         position = None
         speed = 0.0
         if detection:
             position = (detection["world_x"], detection["world_y"])
             speed = detection.get("speed", 0.0)
+
+        # 4) Fuse heading: IMU primary, CV velocity vector as drift correction
+        heading = None
+        
+        # Integrate ESP32 Gyro Z for relative heading
+        if imu_data and imu_data.get("gyro_z") is not None:
+            dt_imu = t_start - last_yaw_time
+            gz = imu_data["gyro_z"]
+            if global_yaw is None:
+                if detection and detection.get("velocity_heading") is not None:
+                    global_yaw = detection["velocity_heading"]
+                else:
+                    global_yaw = 0.0
+            global_yaw = (global_yaw - gz * dt_imu) % 360  # Subtracting generic CCW gyro mapped to CW heading
+        last_yaw_time = t_start
+
+        # Break drift using CV vector
+        if detection and detection.get("velocity_heading") is not None:
+            cv_heading = detection["velocity_heading"]
+            if global_yaw is not None and speed > 0.05:
+                diff = (cv_heading - global_yaw + 180) % 360 - 180
+                global_yaw = (global_yaw + 0.05 * diff) % 360
+            elif global_yaw is None:
+                global_yaw = cv_heading
+                
+        heading = global_yaw
 
         # 5) Autopilot logic
         telem_left = 0.0
@@ -359,6 +356,8 @@ def control_loop():
             ap_engaged = state["autopilot_engaged"]
             target = state["target"]
             waypoints = list(state["waypoints"])
+            
+        cv_pipeline.set_nav_data(waypoints, target)
 
         if ap_engaged and position is not None and heading is not None and target is not None:
             # Determine current waypoint target

@@ -11,12 +11,12 @@ class Config:
 
     # ── Camera ─────────────────────────────────
     CAMERA_INDEX = 0                     # /dev/video0
-    CAMERA_RESOLUTION = (640, 480)     # 1080p capture
-    STREAM_RESOLUTION = (960, 540)       # downscale for streaming
-    JPEG_QUALITY = 70                    # MJPEG fallback quality
+    CAMERA_RESOLUTION = (640, 480)       # Light capture for RPi
+    STREAM_RESOLUTION = (640, 480)       # match camera for no scaling
+    JPEG_QUALITY = 95                    # higher quality for sharper overlays
 
     # ── YOLO Detection ─────────────────────────
-    YOLO_MODEL_PATH = "../CustomYOLO/weights/best_ncnn_model"   # path to custom YOLOv11n weights
+    YOLO_MODEL_PATH = "../models/best_ncnn_model"   # path to custom YOLOv11n weights
     YOLO_CONFIDENCE = 0.5                # min detection confidence
     YOLO_INPUT_SIZE = 416                # model input resolution
     YOLO_CLASS_NAME = "robot"           # expected class label
@@ -31,7 +31,7 @@ class Config:
 
     # ── ESP32 Communication ────────────────────
     ESP32_MAC = "ac:23:16:f2:b3:a6"          # ESP32 MAC for auto-discovery
-    ESP32_IP = "10.144.113.246"              # fallback if MAC scan fails
+    ESP32_IP = "10.144.113.73"              # fallback if MAC scan fails
     UDP_PORT = 9876                          # motor commands out
     IMU_PORT = 9877                          # IMU telemetry in (from ESP32)
     FAILSAFE_TIMEOUT_MS = 500               # motors stop if no cmd in 500ms
@@ -41,18 +41,18 @@ class Config:
     CONTROL_LOOP_HZ = 20                 # 20 Hz main loop
 
     # ── PID — Steering ─────────────────────────
-    PID_KP = 1.20
+    PID_KP = 1.00
     PID_KI = 0.05
-    PID_KD = 0.30
+    PID_KD = 0.15
     PID_OUTPUT_LIMIT = 1.0               # max correction magnitude
 
     # ── PID — Throttle ─────────────────────────
-    THROTTLE_KP = 0.80
-    THROTTLE_KI = 0.02
-    THROTTLE_KD = 0.10
-    BASE_THROTTLE = 0.45                 # cruising power
-    MIN_THROTTLE = 0.20                  # min motor power to move
-    MAX_THROTTLE = 0.85                  # safety cap
+    THROTTLE_KP = 1.00
+    THROTTLE_KI = 0.05
+    THROTTLE_KD = 0.20
+    BASE_THROTTLE = 0.70                 # cruising power
+    MIN_THROTTLE = 0.45                  # min motor power to move
+    MAX_THROTTLE = 1.00                  # safety cap
     APPROACH_SLOW_DIST = 0.25            # slow down within 25cm of target
 
     # ── Navigation ─────────────────────────────
@@ -61,8 +61,8 @@ class Config:
     HEADING_TOLERANCE_DEG = 5.0          # degrees of acceptable heading error
 
     # ── Arena ──────────────────────────────────
-    ARENA_WIDTH_M = 2.0
-    ARENA_HEIGHT_M = 2.0
+    ARENA_WIDTH_M = 1.524        # 5 ft (1.524 meters)
+    ARENA_HEIGHT_M = 2.1336      # 7 ft (2.1336 meters)
 
     # ── Tracking ───────────────────────────────
     POSITION_HISTORY_LENGTH = 50         # frames of position history for trail

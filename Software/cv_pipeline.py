@@ -44,9 +44,7 @@ class CVPipeline:
         self._camera_matrix = None
         self._dist_coeffs = None
 
-        # WebRTC peer connection (aiortc)
-        self._pc = None
-        self._video_track = None
+
 
         # Thread control
         self._running = False
@@ -61,6 +59,7 @@ class CVPipeline:
         self._load_model()
         self._load_calibration()
         self._running = True
+        
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
 
@@ -135,33 +134,42 @@ class CVPipeline:
             self._homography = data["homography"]
             log.info("Homography matrix loaded")
         except FileNotFoundError:
-            log.warning("No homography found — pixel-to-world mapping disabled. "
-                        "Run calibrate.py to generate.")
+            log.warning("No homography found — using simple linear mapping instead of perspective correction.")
 
     def pixel_to_world(self, px, py):
         """
-        Convert pixel coordinates to world coordinates (meters)
-        using the pre-computed homography matrix.
-        Returns (x_m, y_m) or None if no homography.
+        Convert pixel coordinates to world coordinates (meters).
+        Uses homography if available, otherwise falls back to a simple linear mapping.
         """
-        if self._homography is None:
-            return None
-
-        pt = np.array([[[px, py]]], dtype=np.float64)
-        world = cv2.perspectiveTransform(pt, self._homography)
-        return (float(world[0][0][0]), float(world[0][0][1]))
+        if self._homography is not None:
+            pt = np.array([[[px, py]]], dtype=np.float64)
+            world = cv2.perspectiveTransform(pt, self._homography)
+            return (float(world[0][0][0]), float(world[0][0][1]))
+        else:
+            # Fallback simple linear mapping
+            from config import Config
+            w, h = Config.CAMERA_RESOLUTION
+            x_m = (px / w) * Config.ARENA_WIDTH_M
+            y_m = (py / h) * Config.ARENA_HEIGHT_M
+            return (float(x_m), float(y_m))
 
     def world_to_pixel(self, x_m, y_m):
         """Convert world coordinates back to pixel coordinates."""
-        if self._homography is None:
-            return None
-        try:
-            inv_h = np.linalg.inv(self._homography)
-            pt = np.array([[[x_m, y_m]]], dtype=np.float64)
-            pixel = cv2.perspectiveTransform(pt, inv_h)
-            return (float(pixel[0][0][0]), float(pixel[0][0][1]))
-        except np.linalg.LinAlgError:
-            return None
+        if self._homography is not None:
+            try:
+                inv_h = np.linalg.inv(self._homography)
+                pt = np.array([[[x_m, y_m]]], dtype=np.float64)
+                pixel = cv2.perspectiveTransform(pt, inv_h)
+                return (float(pixel[0][0][0]), float(pixel[0][0][1]))
+            except np.linalg.LinAlgError:
+                pass
+            
+        # Fallback simple linear mapping
+        from config import Config
+        w, h = Config.CAMERA_RESOLUTION
+        px = (x_m / Config.ARENA_WIDTH_M) * w
+        py = (y_m / Config.ARENA_HEIGHT_M) * h
+        return (float(px), float(py))
 
     # ──────────────────────────────────────────
     # Capture + Detection Loop
@@ -348,7 +356,7 @@ class CVPipeline:
             h = y2 - y1
             corner_len = min(w, h) * 0.25
             color = (37, 99, 235)  # accent blue
-            t = 2
+            t = 4
 
             # Top-left
             cv2.line(annotated, (int(x1), int(y1)), (int(x1 + corner_len), int(y1)), color, t, cv2.LINE_AA)
@@ -372,14 +380,35 @@ class CVPipeline:
             cv2.putText(
                 annotated, label,
                 (int(x1), int(y1) - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA,
             )
+
+        # Draw navigation path
+        nav_pts = getattr(self, "_nav_waypoints", [])
+        nav_tgt = getattr(self, "_nav_target", None)
+
+        if nav_pts:
+            hw_pts = []
+            for wp in nav_pts:
+                px, py = self.world_to_pixel(wp[0], wp[1])
+                hw_pts.append((int(px), int(py)))
+            
+            for i in range(1, len(hw_pts)):
+                cv2.line(annotated, hw_pts[i-1], hw_pts[i], (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.circle(annotated, hw_pts[-1], 6, (0, 255, 255), -1, cv2.LINE_AA)
+        elif nav_tgt:
+            px, py = self.world_to_pixel(nav_tgt[0], nav_tgt[1])
+            cv2.circle(annotated, (int(px), int(py)), 6, (0, 255, 255), -1, cv2.LINE_AA)
 
         return annotated
 
     # ──────────────────────────────────────────
     # Public accessors
     # ──────────────────────────────────────────
+    def set_nav_data(self, waypoints, target):
+        with self._frame_lock:
+            self._nav_waypoints = list(waypoints) if waypoints else []
+            self._nav_target = target
     def get_latest_detection(self):
         with self._frame_lock:
             return self._latest_detection
@@ -394,114 +423,6 @@ class CVPipeline:
 
         # Downscale for streaming
         sw, sh = Config.STREAM_RESOLUTION
-        small = cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_LINEAR)
+        small = cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_CUBIC)
         ret, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, Config.JPEG_QUALITY])
         return buf.tobytes() if ret else None
-
-    # ──────────────────────────────────────────
-    # WebRTC
-    # ──────────────────────────────────────────
-    def handle_webrtc_offer(self, offer_data):
-        """
-        Process a WebRTC SDP offer from the browser.
-        Uses aiortc to create a peer connection and video track.
-        Returns SDP answer dict or None on failure.
-
-        NOTE: aiortc is optional. If not installed, the dashboard
-        falls back to MJPEG streaming automatically.
-        """
-        try:
-            from aiortc import RTCPeerConnection, RTCSessionDescription
-            from aiortc.contrib.media import MediaRelay
-            import asyncio
-
-            async def _create_answer():
-                pc = RTCPeerConnection()
-                self._pc = pc
-
-                @pc.on("connectionstatechange")
-                async def on_state():
-                    log.info(f"WebRTC state: {pc.connectionState}")
-                    if pc.connectionState == "failed":
-                        await pc.close()
-
-                # Create video track that reads from our CV pipeline
-                video_track = CVVideoTrack(self)
-                pc.addTrack(video_track)
-
-                offer = RTCSessionDescription(
-                    sdp=offer_data["sdp"],
-                    type=offer_data["type"],
-                )
-                await pc.setRemoteDescription(offer)
-                answer = await pc.createAnswer()
-                await pc.setLocalDescription(answer)
-
-                return {
-                    "sdp": pc.localDescription.sdp,
-                    "type": pc.localDescription.type,
-                }
-
-            loop = asyncio.new_event_loop()
-            result = loop.run_until_complete(_create_answer())
-            return result
-
-        except ImportError:
-            log.warning("aiortc not installed — WebRTC unavailable, using MJPEG fallback")
-            return None
-        except Exception as e:
-            log.error(f"WebRTC offer handling failed: {e}")
-            return None
-
-    def add_ice_candidate(self, candidate_data):
-        """Add an ICE candidate to the peer connection."""
-        if self._pc is None:
-            return
-        try:
-            from aiortc import RTCIceCandidate
-            import asyncio
-            # aiortc handles ICE candidates internally via trickle ICE
-            log.debug("ICE candidate received")
-        except Exception as e:
-            log.error(f"ICE candidate error: {e}")
-
-
-class CVVideoTrack:
-    """
-    A video track for aiortc that reads frames from the CV pipeline.
-    This is a simplified implementation — full aiortc MediaStreamTrack
-    subclass would be used in production.
-    """
-
-    def __init__(self, pipeline):
-        self.pipeline = pipeline
-        self.kind = "video"
-
-    async def recv(self):
-        """Return the next video frame for WebRTC."""
-        import asyncio
-        from av import VideoFrame
-
-        # Wait for a frame
-        frame = None
-        for _ in range(10):
-            with self.pipeline._frame_lock:
-                if self.pipeline._latest_frame is not None:
-                    frame = self.pipeline._latest_frame.copy()
-                    break
-            await asyncio.sleep(0.03)
-
-        if frame is None:
-            # Return a black frame if no camera
-            frame = np.zeros((540, 960, 3), dtype=np.uint8)
-
-        # Downscale for WebRTC
-        from config import Config
-        sw, sh = Config.STREAM_RESOLUTION
-        frame = cv2.resize(frame, (sw, sh))
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        video_frame = VideoFrame.from_ndarray(frame, format="rgb24")
-        video_frame.pts = None
-        video_frame.time_base = None
-        return video_frame

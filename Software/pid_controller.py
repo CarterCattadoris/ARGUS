@@ -129,13 +129,9 @@ class PIDAutopilot:
         self.last_steering_error = heading_error
 
         # ── Decide forward vs reverse ──
-        # If target is behind us (>120° error), reverse is more efficient
-        reverse = abs(heading_error) > 120
-        if reverse:
-            # Flip the error for reverse driving
-            effective_error = heading_error - 180 if heading_error > 0 else heading_error + 180
-        else:
-            effective_error = heading_error
+        # Reversing is disabled to preserve spatial orientation tracking.
+        reverse = False
+        effective_error = heading_error
 
         # ── Steering PID ──
         steering = self.steering_pid.compute(effective_error / 180.0, dt)
@@ -160,18 +156,14 @@ class PIDAutopilot:
         # ── Differential drive mixing ──
         # steering > 0 → turn right → left faster, right slower
         # steering < 0 → turn left → left slower, right faster
-        left_power = throttle + steering * 0.5
-        right_power = throttle - steering * 0.5
+        left_power = throttle + steering
+        right_power = throttle - steering
 
-        # If heading error is very large, do a sharper turn (pivot)
-        if abs(effective_error) > 45:
-            turn_boost = min(1.0, abs(effective_error) / 90.0)
-            if effective_error > 0:  # need to turn right
-                left_power = throttle * turn_boost
-                right_power = -throttle * turn_boost * 0.5
-            else:  # need to turn left
-                left_power = -throttle * turn_boost * 0.5
-                right_power = throttle * turn_boost
+        # If heading error is very large, suppress forward throttle to prioritize pivoting
+        if abs(effective_error) > 40:
+            pivot_factor = max(0.0, 1.0 - (abs(effective_error) - 40) / 50.0)
+            left_power = (throttle * pivot_factor) + steering
+            right_power = (throttle * pivot_factor) - steering
 
         # ── Apply reverse: negate both motors ──
         if reverse:

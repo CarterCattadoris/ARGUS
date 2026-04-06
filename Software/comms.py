@@ -194,6 +194,21 @@ class ESP32Comms:
             "left":  round(left, 3),
             "right": round(right, 3),
         }
+        
+        # Debounced terminal logging (4 Hz)
+        import time
+        if not hasattr(self, "_last_log_time"):
+            self._last_log_time = 0
+            self._was_moving = False
+            
+        is_moving = abs(left) > 0.01 or abs(right) > 0.01
+        t_now = time.time()
+        
+        if (not is_moving and self._was_moving) or (is_moving and t_now - self._last_log_time > 0.25):
+            log.info(f"MOTOR COMMAND -> L: {left:+.3f} | R: {right:+.3f}")
+            self._last_log_time = t_now
+        self._was_moving = is_moving
+
         return self._send(cmd)
 
     def _send(self, data):
