@@ -18,13 +18,9 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_count < MAX_RETRIES) {
-            esp_wifi_connect();
-            s_retry_count++;
-            ESP_LOGW(TAG, "Retry %d/%d", s_retry_count, MAX_RETRIES);
-        } else {
-            ESP_LOGE(TAG, "Connection failed after %d retries", MAX_RETRIES);
-        }
+    esp_wifi_connect();  // always retry
+    s_retry_count++;
+    ESP_LOGW(TAG, "Retry %d", s_retry_count);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Connected — IP: " IPSTR, IP2STR(&event->ip_info.ip));

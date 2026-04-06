@@ -8,7 +8,7 @@
 // ── Pin assignments ──
 #define MOTOR_LEFT_IN1    GPIO_NUM_17
 #define MOTOR_LEFT_IN2    GPIO_NUM_16
-#define MOTOR_RIGHT_IN3   GPIO_NUM_3
+#define MOTOR_RIGHT_IN3   GPIO_NUM_9
 #define MOTOR_RIGHT_IN4   GPIO_NUM_8
 
 // ── LEDC config ──

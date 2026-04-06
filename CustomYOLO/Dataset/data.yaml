@@ -1,0 +1,13 @@
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 1
+names: ['robot']
+
+roboflow:
+  workspace: carters-workspace-rcwdf
+  project: carters-workspace-rcwdf
+  version: dataset
+  license: Private
+  url: https://app.roboflow.com/carters-workspace-rcwdf/carters-workspace-rcwdf/dataset
