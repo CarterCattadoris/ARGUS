@@ -5,12 +5,14 @@
 #include "command.h"
 #include "motor.h"
 #include "esp_log.h"
+#include "imu.h"
 
 
 void app_main(void) {
     wifi_init_sta(); // init wifi station to connect to wifi
     command_init(); // init mutex for data security
     motor_init(); // init motor control
+    imu_init(); // init imu sending
 
     xTaskCreate(
         udp_listener_task,

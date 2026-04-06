@@ -98,7 +98,7 @@ void motor_task(void *pvParameters) {
 
     while (1) {
         command_get(&cmd);
-        ESP_LOGI("MTASK", "L=%.2f R=%.2f", cmd.left, cmd.right);
+        // ESP_LOGI("MTASK", "L=%.2f R=%.2f", cmd.left, cmd.right);
         motor_set(cmd.left, cmd.right);
         vTaskDelay(pdMS_TO_TICKS(20));
     }
