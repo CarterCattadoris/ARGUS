@@ -2,6 +2,7 @@
 ARGUS — PID Autopilot Controller
 Dual PID loops: steering (heading correction) + throttle (distance-based speed).
 Outputs differential drive motor commands for the 2WD chassis.
+Signed floats: positive = forward, negative = reverse, per motor.
 """
 
 import math
@@ -58,10 +59,13 @@ class PID:
 class PIDAutopilot:
     """
     Autopilot that converts (position, heading, target) into
-    differential drive motor commands {left, right, dir}.
+    differential drive motor commands {left, right}.
 
     Steering PID: corrects heading error (angle to target vs current heading).
     Throttle PID: controls approach speed based on distance to target.
+
+    Motor values are signed floats in [-1.0, 1.0]:
+        positive = forward, negative = reverse.
     """
 
     def __init__(self, kp=1.2, ki=0.05, kd=0.3,
@@ -93,7 +97,7 @@ class PIDAutopilot:
             dt: timestep in seconds
 
         Returns:
-            dict: {"left": 0.0-1.0, "right": 0.0-1.0, "dir": "fwd"/"rev",
+            dict: {"left": -1.0 to 1.0, "right": -1.0 to 1.0,
                    "steering_correction": float, "distance": float}
         """
         dx = target[0] - position[0]
@@ -105,7 +109,7 @@ class PIDAutopilot:
             if not self._docked:
                 log.info(f"DOCKED — distance: {distance:.3f}m")
                 self._docked = True
-            return {"left": 0.0, "right": 0.0, "dir": "fwd",
+            return {"left": 0.0, "right": 0.0,
                     "steering_correction": 0.0, "distance": distance}
 
         self._docked = False
@@ -125,17 +129,16 @@ class PIDAutopilot:
         self.last_steering_error = heading_error
 
         # ── Decide forward vs reverse ──
-        # If target is behind us (>90° error), reverse is more efficient
-        direction = "fwd"
-        effective_error = heading_error
-        if abs(heading_error) > 120:
-            direction = "rev"
+        # If target is behind us (>120° error), reverse is more efficient
+        reverse = abs(heading_error) > 120
+        if reverse:
             # Flip the error for reverse driving
             effective_error = heading_error - 180 if heading_error > 0 else heading_error + 180
+        else:
+            effective_error = heading_error
 
         # ── Steering PID ──
         steering = self.steering_pid.compute(effective_error / 180.0, dt)
-        # Normalize steering to [-1, 1]
 
         # ── Throttle ──
         # Distance-based throttle with approach slowdown
@@ -160,7 +163,7 @@ class PIDAutopilot:
         left_power = throttle + steering * 0.5
         right_power = throttle - steering * 0.5
 
-        # If heading error is very large, do a sharper turn
+        # If heading error is very large, do a sharper turn (pivot)
         if abs(effective_error) > 45:
             turn_boost = min(1.0, abs(effective_error) / 90.0)
             if effective_error > 0:  # need to turn right
@@ -170,15 +173,18 @@ class PIDAutopilot:
                 left_power = -throttle * turn_boost * 0.5
                 right_power = throttle * turn_boost
 
-        # Clamp to [0, 1] — negative values mean we need to reverse that side
-        # For differential drive, handle by adjusting direction
-        left_power = max(0.0, min(1.0, abs(left_power)))
-        right_power = max(0.0, min(1.0, abs(right_power)))
+        # ── Apply reverse: negate both motors ──
+        if reverse:
+            left_power = -left_power
+            right_power = -right_power
+
+        # ── Clamp to [-1, 1] — sign preserved ──
+        left_power = max(-1.0, min(1.0, left_power))
+        right_power = max(-1.0, min(1.0, right_power))
 
         return {
             "left": round(left_power, 3),
             "right": round(right_power, 3),
-            "dir": direction,
             "steering_correction": round(steering, 3),
             "distance": round(distance, 3),
         }

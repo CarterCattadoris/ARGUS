@@ -17,7 +17,7 @@ from flask_socketio import SocketIO, emit
 
 from cv_pipeline import CVPipeline
 from pid_controller import PIDAutopilot
-from comms import ESP32Comms
+from comms import ESP32Comms, find_esp32_by_mac
 from config import Config
 
 # ──────────────────────────────────────────────
@@ -53,9 +53,18 @@ cv_pipeline = CVPipeline(
     confidence=Config.YOLO_CONFIDENCE,
 )
 
+# Auto-discover ESP32 by MAC address
+_discovered_ip = find_esp32_by_mac(Config.ESP32_MAC)
+_esp32_ip = _discovered_ip if _discovered_ip else Config.ESP32_IP
+if _discovered_ip:
+    log.info(f"ESP32 auto-discovered at {_discovered_ip}")
+else:
+    log.warning(f"ESP32 not found by MAC, using fallback IP: {Config.ESP32_IP}")
+
 esp32 = ESP32Comms(
-    esp32_ip=Config.ESP32_IP,
+    esp32_ip=_esp32_ip,
     udp_port=Config.UDP_PORT,
+    imu_port=Config.IMU_PORT,
     failsafe_timeout=Config.FAILSAFE_TIMEOUT_MS,
 )
 
@@ -113,10 +122,6 @@ def video_feed():
 # ──────────────────────────────────────────────
 @socketio.on("webrtc_offer")
 def handle_webrtc_offer(data):
-    """
-    Receive SDP offer from browser, pass to CV pipeline's
-    WebRTC handler, return SDP answer.
-    """
     log.info("WebRTC offer received from client")
     answer = cv_pipeline.handle_webrtc_offer(data)
     if answer:
@@ -127,7 +132,6 @@ def handle_webrtc_offer(data):
 
 @socketio.on("webrtc_ice_candidate")
 def handle_ice_candidate(data):
-    """Forward ICE candidate to the CV pipeline's peer connection."""
     cv_pipeline.add_ice_candidate(data)
 
 
@@ -142,6 +146,10 @@ def on_connect():
         "camera": cv_pipeline.is_camera_open(),
         "imu": esp32.imu_active,
     })
+    emit("esp32_config", {
+        "ip": esp32.esp32_ip,
+        "port": esp32.udp_port,
+    })
 
 
 @socketio.on("disconnect")
@@ -151,7 +159,7 @@ def on_disconnect():
         state["manual_command"] = None
         if state["autopilot_engaged"]:
             state["autopilot_engaged"] = False
-            esp32.send_motor_command(0.0, 0.0, "fwd")
+            esp32.send_motor_command(0.0, 0.0)
             log.warning("Autopilot disengaged — client disconnected")
 
 
@@ -159,7 +167,8 @@ def on_disconnect():
 def handle_manual_drive(data):
     """
     Manual WASD drive commands from the dashboard.
-    data: { "left": 0.0-1.0, "right": 0.0-1.0, "dir": "fwd"/"rev" }
+    data: { "left": -1.0 to 1.0, "right": -1.0 to 1.0 }
+    Positive = forward, negative = reverse per motor.
     """
     with state_lock:
         if state["autopilot_engaged"]:
@@ -169,8 +178,7 @@ def handle_manual_drive(data):
 
     left = float(data.get("left", 0))
     right = float(data.get("right", 0))
-    direction = data.get("dir", "fwd")
-    esp32.send_motor_command(left, right, direction)
+    esp32.send_motor_command(left, right)
 
 
 @socketio.on("manual_stop")
@@ -178,7 +186,38 @@ def handle_manual_stop():
     """Stop motors when keys released."""
     with state_lock:
         state["manual_command"] = None
-    esp32.send_motor_command(0.0, 0.0, "fwd")
+    esp32.send_motor_command(0.0, 0.0)
+
+
+@socketio.on("update_esp32_ip")
+def handle_update_esp32_ip(data):
+    """Update ESP32 IP and port from dashboard."""
+    ip = data.get("ip", "").strip()
+    port = data.get("port", Config.UDP_PORT)
+    try:
+        port = int(port)
+    except (ValueError, TypeError):
+        emit("error", {"msg": "Invalid port number"})
+        return
+    if not ip:
+        emit("error", {"msg": "IP address cannot be empty"})
+        return
+    esp32.update_target(ip, port)
+    log.info(f"ESP32 target updated from dashboard: {ip}:{port}")
+    emit("esp32_config", {"ip": ip, "port": port})
+
+
+@socketio.on("scan_esp32")
+def handle_scan_esp32():
+    """Scan network for ESP32 by MAC address."""
+    log.info("Dashboard triggered ESP32 MAC scan")
+    ip = find_esp32_by_mac(Config.ESP32_MAC)
+    if ip:
+        esp32.update_target(ip, esp32.udp_port)
+        emit("esp32_config", {"ip": ip, "port": esp32.udp_port})
+        emit("scan_result", {"success": True, "ip": ip})
+    else:
+        emit("scan_result", {"success": False})
 
 
 @socketio.on("toggle_autopilot")
@@ -191,7 +230,7 @@ def handle_toggle_autopilot(data):
 
         state["autopilot_engaged"] = engage
         if not engage:
-            esp32.send_motor_command(0.0, 0.0, "fwd")
+            esp32.send_motor_command(0.0, 0.0)
             autopilot.reset()
             log.info("Autopilot disengaged")
         else:
@@ -204,16 +243,14 @@ def handle_toggle_autopilot(data):
 def handle_set_target(data):
     """
     Set docking target from dashboard click.
-    data: { "px": pixel_x, "py": pixel_y }
-    Converts pixel coords to world coordinates via the CV pipeline's
-    homography matrix.
+    Converts pixel coords to world coordinates via homography.
     """
     px, py = float(data["px"]), float(data["py"])
     world_coords = cv_pipeline.pixel_to_world(px, py)
     if world_coords is not None:
         with state_lock:
             state["target"] = world_coords
-            state["waypoints"] = []  # clear drawn path when setting single target
+            state["waypoints"] = []
         log.info(f"Target set: pixel=({px:.0f},{py:.0f}) → world=({world_coords[0]:.3f},{world_coords[1]:.3f})m")
         emit("target_confirmed", {
             "world_x": world_coords[0],
@@ -242,12 +279,11 @@ def handle_set_waypoints(data):
         emit("error", {"msg": "Need at least 2 valid waypoints"})
         return
 
-    # Simplify path — keep every Nth point to reduce noise
-    simplified = simplify_path(world_points, min_distance=0.03)  # 3cm min spacing
+    simplified = simplify_path(world_points, min_distance=0.03)
 
     with state_lock:
         state["waypoints"] = simplified
-        state["target"] = simplified[-1]  # final waypoint is the target
+        state["target"] = simplified[-1]
 
     log.info(f"Path set: {len(simplified)} waypoints, final target=({simplified[-1][0]:.3f},{simplified[-1][1]:.3f})m")
     emit("waypoints_confirmed", {
@@ -269,7 +305,6 @@ def simplify_path(points, min_distance=0.03):
         dy = pt[1] - simplified[-1][1]
         if (dx * dx + dy * dy) ** 0.5 >= min_distance:
             simplified.append(pt)
-    # Always include the last point
     if simplified[-1] != points[-1]:
         simplified.append(points[-1])
     return simplified
@@ -304,7 +339,6 @@ def control_loop():
             heading = imu_data["yaw"]
         if detection and detection.get("velocity_heading") is not None:
             if heading is not None:
-                # Complementary filter: 90% IMU, 10% CV
                 cv_heading = detection["velocity_heading"]
                 heading = 0.9 * heading + 0.1 * cv_heading
             else:
@@ -318,10 +352,8 @@ def control_loop():
             speed = detection.get("speed", 0.0)
 
         # 5) Autopilot logic
-        left_power = 0.0
-        right_power = 0.0
-        direction = "fwd"
-        pid_output = None
+        telem_left = 0.0
+        telem_right = 0.0
 
         with state_lock:
             ap_engaged = state["autopilot_engaged"]
@@ -332,7 +364,6 @@ def control_loop():
             # Determine current waypoint target
             if waypoints:
                 current_target = waypoints[0]
-                # Check if we've reached this waypoint
                 dx = current_target[0] - position[0]
                 dy = current_target[1] - position[1]
                 dist = (dx * dx + dy * dy) ** 0.5
@@ -354,14 +385,14 @@ def control_loop():
                 dt=loop_rate,
             )
 
-            left_power = pid_output["left"]
-            right_power = pid_output["right"]
-            direction = pid_output["dir"]
-            esp32.send_motor_command(left_power, right_power, direction)
+            # PID returns signed floats: positive=fwd, negative=rev
+            telem_left = pid_output["left"]
+            telem_right = pid_output["right"]
+            esp32.send_motor_command(telem_left, telem_right)
 
-        elif not ap_engaged:
-            # Manual mode — commands sent directly in handle_manual_drive
-            pass
+        else:
+            if state["manual_command"] is None:
+                esp32.send_motor_command(0.0, 0.0)
 
         # 6) Compute distance to target
         distance_to_target = None
@@ -385,9 +416,8 @@ def control_loop():
             "speed": round(speed, 3),
             "distance_to_target": round(distance_to_target, 3) if distance_to_target is not None else None,
             "motors": {
-                "left": round(left_power, 2),
-                "right": round(right_power, 2),
-                "dir": direction,
+                "left": round(telem_left, 2),
+                "right": round(telem_right, 2),
             },
             "pid": {
                 "kp": autopilot.steering_pid.kp,
@@ -399,9 +429,12 @@ def control_loop():
             "autopilot": ap_engaged,
             "target": {"x": target[0], "y": target[1]} if target else None,
             "imu": {
-                "yaw": imu_data.get("yaw") if imu_data else None,
-                "accel_x": imu_data.get("accel_x") if imu_data else None,
-                "accel_y": imu_data.get("accel_y") if imu_data else None,
+                "accel_x": round(imu_data.get("accel_x"), 3) if imu_data and imu_data.get("accel_x") is not None else None,
+                "accel_y": round(imu_data.get("accel_y"), 3) if imu_data and imu_data.get("accel_y") is not None else None,
+                "accel_z": round(imu_data.get("accel_z"), 3) if imu_data and imu_data.get("accel_z") is not None else None,
+                "gyro_x": round(imu_data.get("gyro_x"), 2) if imu_data and imu_data.get("gyro_x") is not None else None,
+                "gyro_y": round(imu_data.get("gyro_y"), 2) if imu_data and imu_data.get("gyro_y") is not None else None,
+                "gyro_z": round(imu_data.get("gyro_z"), 2) if imu_data and imu_data.get("gyro_z") is not None else None,
             },
             "fps": current_fps,
             "connection": {
@@ -424,21 +457,17 @@ def control_loop():
 # Startup
 # ──────────────────────────────────────────────
 def start_subsystems():
-    """Initialize all subsystems before starting the control loop."""
     log.info("=" * 50)
     log.info("  ARGUS Ground Control Station")
     log.info("=" * 50)
 
-    # Start camera + CV pipeline
     cv_pipeline.start()
     log.info(f"CV pipeline started (camera={Config.CAMERA_INDEX}, "
              f"res={Config.CAMERA_RESOLUTION}, model={Config.YOLO_MODEL_PATH})")
 
-    # Start ESP32 comms (UDP listener for IMU data)
     esp32.start()
     log.info(f"ESP32 comms started (ip={Config.ESP32_IP}, port={Config.UDP_PORT})")
 
-    # Start control loop in background thread
     ctrl_thread = threading.Thread(target=control_loop, daemon=True)
     ctrl_thread.start()
     log.info(f"Control loop running at {Config.CONTROL_LOOP_HZ} Hz")

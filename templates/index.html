@@ -301,6 +301,38 @@
     transition: left 0.1s, width 0.1s;
   }
 
+  /* ── ESP32 Config Panel ── */
+  .esp-config-row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .esp-config-field { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+  .esp-config-field.port { flex: 0 0 72px; }
+  .esp-config-label { font-size: 10px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
+  .esp-config-input {
+    font-family: var(--mono); font-size: 12px;
+    padding: 6px 8px;
+    border: 1px solid var(--border); border-radius: 5px;
+    background: rgba(247,248,250,0.5); color: var(--text);
+    outline: none; transition: border-color 0.15s;
+  }
+  .esp-config-input:focus { border-color: var(--accent); }
+  .esp-connect-btn {
+    width: 100%; padding: 7px 0; margin-top: 2px;
+    font-family: var(--font); font-size: 11px; font-weight: 600;
+    color: #fff; background: var(--accent);
+    border: none; border-radius: 5px; cursor: pointer;
+    transition: opacity 0.15s; letter-spacing: 0.3px;
+  }
+  .esp-connect-btn:hover { opacity: 0.85; }
+  .esp-btn-row { display: flex; gap: 6px; margin-top: 2px; }
+  .esp-scan-btn {
+    flex: 0 0 auto; padding: 7px 12px;
+    font-family: var(--font); font-size: 11px; font-weight: 600;
+    color: var(--accent); background: var(--accent-bg);
+    border: 1px solid var(--accent); border-radius: 5px; cursor: pointer;
+    transition: all 0.15s; letter-spacing: 0.3px;
+  }
+  .esp-scan-btn:hover { background: var(--accent); color: #fff; }
+  .esp-scan-btn.scanning { opacity: 0.6; pointer-events: none; }
+
   .sidebar-spacer { flex: 1; }
   .sidebar-footer { padding: 12px 20px; border-top: 1px solid var(--panel-border); }
   .shortcut-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; }
@@ -404,6 +436,23 @@
 
     <div class="sidebar">
       <div class="panel">
+        <div class="panel-title">ESP32 Connection</div>
+        <div class="esp-config-row">
+          <div class="esp-config-field">
+            <label class="esp-config-label" for="espIpInput">IP Address</label>
+            <input type="text" class="esp-config-input" id="espIpInput" placeholder="192.168.1.100" spellcheck="false">
+          </div>
+          <div class="esp-config-field port">
+            <label class="esp-config-label" for="espPortInput">Port</label>
+            <input type="number" class="esp-config-input" id="espPortInput" placeholder="9876" min="1" max="65535">
+          </div>
+        </div>
+        <div class="esp-btn-row">
+          <button class="esp-connect-btn" id="espConnectBtn" style="flex:1">Update</button>
+          <button class="esp-scan-btn" id="espScanBtn" title="Scan network for ESP32 by MAC address">⚡ Scan</button>
+        </div>
+      </div>
+      <div class="panel">
         <div class="panel-title">Telemetry</div>
         <div class="telem-grid">
           <div class="telem-item">
@@ -443,6 +492,25 @@
           </div>
         </div>
         <div class="motor-dir" id="motorDir">Direction: —</div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">IMU</div>
+        <div style="margin-bottom:8px">
+          <div style="font-size:10px;color:var(--text-tertiary);margin-bottom:4px;">Accelerometer (g)</div>
+          <div class="telem-grid" style="grid-template-columns:1fr 1fr 1fr;gap:6px">
+            <div class="telem-item"><div class="telem-item-label">X</div><div class="telem-item-value" id="imuAx" style="font-size:13px">—</div></div>
+            <div class="telem-item"><div class="telem-item-label">Y</div><div class="telem-item-value" id="imuAy" style="font-size:13px">—</div></div>
+            <div class="telem-item"><div class="telem-item-label">Z</div><div class="telem-item-value" id="imuAz" style="font-size:13px">—</div></div>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--text-tertiary);margin-bottom:4px;">Gyroscope (°/s)</div>
+          <div class="telem-grid" style="grid-template-columns:1fr 1fr 1fr;gap:6px">
+            <div class="telem-item"><div class="telem-item-label">X</div><div class="telem-item-value" id="imuGx" style="font-size:13px">—</div></div>
+            <div class="telem-item"><div class="telem-item-label">Y</div><div class="telem-item-value" id="imuGy" style="font-size:13px">—</div></div>
+            <div class="telem-item"><div class="telem-item-label">Z</div><div class="telem-item-value" id="imuGz" style="font-size:13px">—</div></div>
+          </div>
+        </div>
       </div>
       <div class="panel">
         <div class="panel-title">PID Controller</div>
@@ -628,11 +696,16 @@ socket.on('telemetry', (data) => {
   }
 
   // Motors
-  $('motorLeftVal').textContent = data.motors.left.toFixed(2);
-  $('motorRightVal').textContent = data.motors.right.toFixed(2);
-  $('motorLeftBar').style.width = (data.motors.left * 100) + '%';
-  $('motorRightBar').style.width = (data.motors.right * 100) + '%';
-  $('motorDir').textContent = `Direction: ${data.motors.dir}`;
+  const ml = data.motors.left;
+  const mr = data.motors.right;
+  $('motorLeftVal').textContent = ml.toFixed(2);
+  $('motorRightVal').textContent = mr.toFixed(2);
+  $('motorLeftBar').style.width = (Math.abs(ml) * 100) + '%';
+  $('motorRightBar').style.width = (Math.abs(mr) * 100) + '%';
+  $('motorLeftBar').style.background = ml < 0 ? 'var(--amber)' : 'var(--text)';
+  $('motorRightBar').style.background = mr < 0 ? 'var(--amber)' : 'var(--text)';
+  const dir = (ml > 0.05 || mr > 0.05) ? 'FWD' : (ml < -0.05 || mr < -0.05) ? 'REV' : 'STOP';
+  $('motorDir').textContent = `Direction: ${dir}`;
 
   // PID
   $('pidKp').textContent = data.pid.kp.toFixed(2);
@@ -658,6 +731,16 @@ socket.on('telemetry', (data) => {
   $('connESP32').className = 'conn-dot' + (data.connection.esp32 ? ' ok' : '');
   $('connCamera').className = 'conn-dot' + (data.connection.camera ? ' ok' : '');
   $('connIMU').className = 'conn-dot' + (data.connection.imu ? ' ok' : ' warn');
+
+  // IMU data
+  if (data.imu) {
+    $('imuAx').textContent = data.imu.accel_x !== null ? data.imu.accel_x.toFixed(3) : '—';
+    $('imuAy').textContent = data.imu.accel_y !== null ? data.imu.accel_y.toFixed(3) : '—';
+    $('imuAz').textContent = data.imu.accel_z !== null ? data.imu.accel_z.toFixed(3) : '—';
+    $('imuGx').textContent = data.imu.gyro_x !== null ? data.imu.gyro_x.toFixed(2) : '—';
+    $('imuGy').textContent = data.imu.gyro_y !== null ? data.imu.gyro_y.toFixed(2) : '—';
+    $('imuGz').textContent = data.imu.gyro_z !== null ? data.imu.gyro_z.toFixed(2) : '—';
+  }
 
   // Autopilot state sync
   if (data.autopilot !== autopilotEngaged) {
@@ -685,22 +768,62 @@ socket.on('disconnect', () => {
   toast('Disconnected from ground station', 'error');
 });
 
+// ── ESP32 Config ──
+socket.on('esp32_config', (data) => {
+  $('espIpInput').value = data.ip || '';
+  $('espPortInput').value = data.port || '';
+});
+
+$('espConnectBtn').addEventListener('click', () => {
+  const ip = $('espIpInput').value.trim();
+  const port = parseInt($('espPortInput').value, 10);
+  if (!ip) { toast('Enter an IP address', 'error'); return; }
+  if (!port || port < 1 || port > 65535) { toast('Enter a valid port (1-65535)', 'error'); return; }
+  socket.emit('update_esp32_ip', { ip, port });
+  toast(`ESP32 target → ${ip}:${port}`, 'success');
+});
+
+// Allow Enter key to submit in the IP/port fields
+['espIpInput', 'espPortInput'].forEach(id => {
+  $(id).addEventListener('keydown', (e) => {
+    e.stopPropagation(); // prevent WASD drive keys from firing
+    if (e.key === 'Enter') $('espConnectBtn').click();
+  });
+  $(id).addEventListener('keyup', (e) => e.stopPropagation());
+});
+
+$('espScanBtn').addEventListener('click', () => {
+  $('espScanBtn').classList.add('scanning');
+  $('espScanBtn').textContent = '⚡ Scanning…';
+  socket.emit('scan_esp32');
+});
+
+socket.on('scan_result', (data) => {
+  $('espScanBtn').classList.remove('scanning');
+  $('espScanBtn').textContent = '⚡ Scan';
+  if (data.success) {
+    toast(`ESP32 found at ${data.ip}`, 'success');
+  } else {
+    toast('ESP32 not found on network', 'error');
+  }
+});
+
 // ═══════════════════════════════════════════════════════
 // MANUAL DRIVE (WASD)
 // ═══════════════════════════════════════════════════════
 
 function computeDriveCommand() {
-  let left = 0, right = 0, dir = 'fwd';
+  let left = 0, right = 0;
 
   if (keys.w) { left += DRIVE_POWER; right += DRIVE_POWER; }
-  if (keys.s) { left += DRIVE_POWER; right += DRIVE_POWER; dir = 'rev'; }
+  if (keys.s) { left -= DRIVE_POWER; right -= DRIVE_POWER; }
   if (keys.a) { left -= TURN_POWER; right += TURN_POWER; }
   if (keys.d) { left += TURN_POWER; right -= TURN_POWER; }
 
-  left = Math.max(0, Math.min(1, Math.abs(left)));
-  right = Math.max(0, Math.min(1, Math.abs(right)));
+  left = Math.max(-1, Math.min(1, left));
+  right = Math.max(-1, Math.min(1, right));
 
-  return { left, right, dir };
+  return { left, right };
 }
 
 function sendDriveCommand() {

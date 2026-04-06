@@ -17,7 +17,8 @@ esp_err_t motor_init(void) {
     };
     ESP_ERROR_CHECK(ledc_timer_config(&motor_timer));
 
-    ledc_channel_config_t left_ch = {
+    /* Left motor — IN1 (forward PWM) */
+    ledc_channel_config_t left_fwd = {
         .speed_mode = MOTOR_LEDC_MODE,
         .channel    = MOTOR_LEFT_CHANNEL,
         .timer_sel  = MOTOR_LEDC_TIMER,
@@ -25,9 +26,21 @@ esp_err_t motor_init(void) {
         .duty       = 0,
         .hpoint     = 0,
     };
-    ESP_ERROR_CHECK(ledc_channel_config(&left_ch));
+    ESP_ERROR_CHECK(ledc_channel_config(&left_fwd));
 
-    ledc_channel_config_t right_ch = {
+    /* Left motor — IN2 (reverse PWM) */
+    ledc_channel_config_t left_rev = {
+        .speed_mode = MOTOR_LEDC_MODE,
+        .channel    = MOTOR_LEFT_REV_CHANNEL,
+        .timer_sel  = MOTOR_LEDC_TIMER,
+        .gpio_num   = MOTOR_LEFT_IN2,
+        .duty       = 0,
+        .hpoint     = 0,
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&left_rev));
+
+    /* Right motor — IN3 (forward PWM) */
+    ledc_channel_config_t right_fwd = {
         .speed_mode = MOTOR_LEDC_MODE,
         .channel    = MOTOR_RIGHT_CHANNEL,
         .timer_sel  = MOTOR_LEDC_TIMER,
@@ -35,62 +48,68 @@ esp_err_t motor_init(void) {
         .duty       = 0,
         .hpoint     = 0,
     };
-    ESP_ERROR_CHECK(ledc_channel_config(&right_ch));
+    ESP_ERROR_CHECK(ledc_channel_config(&right_fwd));
 
-    gpio_config_t dir_pins = {
-        .pin_bit_mask = (1ULL << MOTOR_LEFT_IN2) |
-                        (1ULL << MOTOR_RIGHT_IN4),
-        .mode         = GPIO_MODE_OUTPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
+    /* Right motor — IN4 (reverse PWM) */
+    ledc_channel_config_t right_rev = {
+        .speed_mode = MOTOR_LEDC_MODE,
+        .channel    = MOTOR_RIGHT_REV_CHANNEL,
+        .timer_sel  = MOTOR_LEDC_TIMER,
+        .gpio_num   = MOTOR_RIGHT_IN4,
+        .duty       = 0,
+        .hpoint     = 0,
     };
-    ESP_ERROR_CHECK(gpio_config(&dir_pins));
+    ESP_ERROR_CHECK(ledc_channel_config(&right_rev));
 
-    ESP_LOGI(TAG, "Motor init complete");
+    ESP_LOGI(TAG, "Motor init complete (4-channel LEDC)");
     return ESP_OK;
 }
 
-static void set_single_motor(float val, ledc_channel_t channel, gpio_num_t dir_pin) {
-    // Deadband
+static void set_single_motor(float val, ledc_channel_t fwd_ch, ledc_channel_t rev_ch) {
+    /* Deadband */
     if (fabsf(val) < 0.05f) {
-        gpio_set_level(dir_pin, 0);
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, channel, 0));
-        ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, channel));
+        ledc_set_duty(MOTOR_LEDC_MODE, fwd_ch, 0);
+        ledc_update_duty(MOTOR_LEDC_MODE, fwd_ch);
+        ledc_set_duty(MOTOR_LEDC_MODE, rev_ch, 0);
+        ledc_update_duty(MOTOR_LEDC_MODE, rev_ch);
         return;
     }
 
-    // Clamp
+    /* Clamp */
     if (val < -1.0f) val = -1.0f;
-    if (val > 1.0f) val = 1.0f;
+    if (val >  1.0f) val =  1.0f;
 
     uint32_t duty = (uint32_t)(fabsf(val) * MOTOR_PWM_MAX_DUTY);
 
     if (val > 0.0f) {
-        // Forward: IN2/IN4 HIGH (motors wired reversed), PWM on IN1/IN3
-        gpio_set_level(dir_pin, 1);
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, channel, duty));
+        /* Forward: PWM on IN1/IN3, IN2/IN4 = 0 */
+        ledc_set_duty(MOTOR_LEDC_MODE, fwd_ch, duty);
+        ledc_update_duty(MOTOR_LEDC_MODE, fwd_ch);
+        ledc_set_duty(MOTOR_LEDC_MODE, rev_ch, 0);
+        ledc_update_duty(MOTOR_LEDC_MODE, rev_ch);
     } else {
-        // Reverse: IN2/IN4 LOW, PWM inverted on IN1/IN3
-        gpio_set_level(dir_pin, 0);
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, channel, MOTOR_PWM_MAX_DUTY - duty));
+        /* Reverse: IN1/IN3 = 0, PWM on IN2/IN4 */
+        ledc_set_duty(MOTOR_LEDC_MODE, fwd_ch, 0);
+        ledc_update_duty(MOTOR_LEDC_MODE, fwd_ch);
+        ledc_set_duty(MOTOR_LEDC_MODE, rev_ch, duty);
+        ledc_update_duty(MOTOR_LEDC_MODE, rev_ch);
     }
-
-    ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, channel));
 }
 
 void motor_set(float left, float right) {
-    set_single_motor(left, MOTOR_LEFT_CHANNEL, MOTOR_LEFT_IN2);
-    set_single_motor(right, MOTOR_RIGHT_CHANNEL, MOTOR_RIGHT_IN4);
+    set_single_motor(left,  MOTOR_LEFT_CHANNEL,  MOTOR_LEFT_REV_CHANNEL);
+    set_single_motor(right, MOTOR_RIGHT_CHANNEL, MOTOR_RIGHT_REV_CHANNEL);
 }
 
 void motor_stop(void) {
-    gpio_set_level(MOTOR_LEFT_IN2, 0);
-    gpio_set_level(MOTOR_RIGHT_IN4, 0);
-    ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL, 0));
-    ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL, 0));
-    ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL));
-    ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL));
+    ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL, 0);
+    ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL);
+    ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_REV_CHANNEL, 0);
+    ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_REV_CHANNEL);
+    ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL, 0);
+    ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL);
+    ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_REV_CHANNEL, 0);
+    ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_REV_CHANNEL);
 }
 
 void motor_task(void *pvParameters) {
@@ -98,7 +117,6 @@ void motor_task(void *pvParameters) {
 
     while (1) {
         command_get(&cmd);
-        // ESP_LOGI("MTASK", "L=%.2f R=%.2f", cmd.left, cmd.right);
         motor_set(cmd.left, cmd.right);
         vTaskDelay(pdMS_TO_TICKS(20));
     }

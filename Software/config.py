@@ -30,10 +30,12 @@ class Config:
     HOMOGRAPHY_FILE = "calibration/homography.npz"
 
     # ── ESP32 Communication ────────────────────
-    ESP32_IP = "10.144.113.116"           # ← change to your ESP32's static IP
-    UDP_PORT = 9876                      # bidirectional: cmds out, IMU in
-    FAILSAFE_TIMEOUT_MS = 500            # motors stop if no cmd in 500ms
-    IMU_TIMEOUT_S = 2.0                  # mark IMU inactive after 2s silence
+    ESP32_MAC = "ac:23:16:f2:b3:a6"          # ESP32 MAC for auto-discovery
+    ESP32_IP = "10.144.113.246"              # fallback if MAC scan fails
+    UDP_PORT = 9876                          # motor commands out
+    IMU_PORT = 9877                          # IMU telemetry in (from ESP32)
+    FAILSAFE_TIMEOUT_MS = 500               # motors stop if no cmd in 500ms
+    IMU_TIMEOUT_S = 2.0                     # mark IMU inactive after 2s silence
 
     # ── Control Loop ───────────────────────────
     CONTROL_LOOP_HZ = 20                 # 20 Hz main loop
