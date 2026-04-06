@@ -60,22 +60,18 @@ void udp_listener_task(void *arg)
 
         cJSON *j_left  = cJSON_GetObjectItem(root, "left");
         cJSON *j_right = cJSON_GetObjectItem(root, "right");
-        cJSON *j_dir   = cJSON_GetObjectItem(root, "dir");
 
         if (cJSON_IsNumber(j_left) && cJSON_IsNumber(j_right)) {
             float left  = (float)j_left->valuedouble;
             float right = (float)j_right->valuedouble;
-            int dir = 1;
-            if (j_dir && cJSON_IsNumber(j_dir)) {
-                dir = (int)j_dir->valuedouble;
-            }
-            command_update(left, right, dir, esp_timer_get_time());
-            ESP_LOGI(TAG, "CMD: L=%.2f R=%.2f D=%d", left, right, dir);
+
+            command_update(left, right, esp_timer_get_time());
+            ESP_LOGI(TAG, "CMD: L=%.2f R=%.2f", left, right);
             // Echo back (only for testing, delete later)
             char resp[128];
             int len = snprintf(resp, sizeof(resp),
-                "{\"left\":%.2f,\"right\":%.2f,\"dir\":%d}",
-                left, right, dir);
+                "{\"left\":%.2f,\"right\":%.2f}",
+                left, right);
             sendto(fd, resp, len, 0, (struct sockaddr *)&client, client_len);
         }
 

@@ -3,11 +3,11 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <math.h>
 
 static const char *TAG = "MOTOR";
 
 esp_err_t motor_init(void) {
-    // Timer shared by all motor LEDC channels
     ledc_timer_config_t motor_timer = {
         .speed_mode      = MOTOR_LEDC_MODE,
         .duty_resolution = MOTOR_PWM_RESOLUTION,
@@ -17,7 +17,6 @@ esp_err_t motor_init(void) {
     };
     ESP_ERROR_CHECK(ledc_timer_config(&motor_timer));
 
-    // IN1 — left motor PWM (forward)
     ledc_channel_config_t left_ch = {
         .speed_mode = MOTOR_LEDC_MODE,
         .channel    = MOTOR_LEFT_CHANNEL,
@@ -28,7 +27,6 @@ esp_err_t motor_init(void) {
     };
     ESP_ERROR_CHECK(ledc_channel_config(&left_ch));
 
-    // IN3 — right motor PWM (forward)
     ledc_channel_config_t right_ch = {
         .speed_mode = MOTOR_LEDC_MODE,
         .channel    = MOTOR_RIGHT_CHANNEL,
@@ -39,7 +37,6 @@ esp_err_t motor_init(void) {
     };
     ESP_ERROR_CHECK(ledc_channel_config(&right_ch));
 
-    // IN2 and IN4 as plain GPIO for direction
     gpio_config_t dir_pins = {
         .pin_bit_mask = (1ULL << MOTOR_LEFT_IN2) |
                         (1ULL << MOTOR_RIGHT_IN4),
@@ -54,43 +51,37 @@ esp_err_t motor_init(void) {
     return ESP_OK;
 }
 
-void motor_set(float left, float right, int dir) {
-    if (left < 0.0f) left = 0.0f;
-    if (left > 1.0f) left = 1.0f;
-    if (right < 0.0f) right = 0.0f;
-    if (right > 1.0f) right = 1.0f;
-
-    uint32_t left_duty = (uint32_t)(left * MOTOR_PWM_MAX_DUTY);
-    uint32_t right_duty = (uint32_t)(right * MOTOR_PWM_MAX_DUTY);
-
-    if (dir == 1) {
-        // Forward: PWM on IN1/IN3, IN2/IN4 LOW
-        gpio_set_level(MOTOR_LEFT_IN2, 0);
-        gpio_set_level(MOTOR_RIGHT_IN4, 0);
-
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL, left_duty));
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL, right_duty));
-    } else if (dir == -1) {
-        // Reverse: IN1/IN3 LOW, PWM on IN2/IN4
-        // Stop PWM channels first
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL, 0));
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL, 0));
-        ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL));
-        ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL));
-
-        // Set IN2/IN4 HIGH, IN1/IN3 held LOW by 0 duty
-        gpio_set_level(MOTOR_LEFT_IN2, 1);
-        gpio_set_level(MOTOR_RIGHT_IN4, 1);
-
-        // PWM on IN1/IN3 inverted: high duty = more braking, so we invert
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL, MOTOR_PWM_MAX_DUTY - left_duty));
-        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL, MOTOR_PWM_MAX_DUTY - right_duty));
+static void set_single_motor(float val, ledc_channel_t channel, gpio_num_t dir_pin) {
+    // Deadband
+    if (fabsf(val) < 0.05f) {
+        gpio_set_level(dir_pin, 0);
+        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, channel, 0));
+        ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, channel));
+        return;
     }
 
-    ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_LEFT_CHANNEL));
-    ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, MOTOR_RIGHT_CHANNEL));
+    // Clamp
+    if (val < -1.0f) val = -1.0f;
+    if (val > 1.0f) val = 1.0f;
 
-    ESP_LOGI(TAG, "dir=%d left_duty=%lu right_duty=%lu", dir, left_duty, right_duty);
+    uint32_t duty = (uint32_t)(fabsf(val) * MOTOR_PWM_MAX_DUTY);
+
+    if (val > 0.0f) {
+        // Forward: IN2/IN4 HIGH (motors wired reversed), PWM on IN1/IN3
+        gpio_set_level(dir_pin, 1);
+        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, channel, duty));
+    } else {
+        // Reverse: IN2/IN4 LOW, PWM inverted on IN1/IN3
+        gpio_set_level(dir_pin, 0);
+        ESP_ERROR_CHECK(ledc_set_duty(MOTOR_LEDC_MODE, channel, MOTOR_PWM_MAX_DUTY - duty));
+    }
+
+    ESP_ERROR_CHECK(ledc_update_duty(MOTOR_LEDC_MODE, channel));
+}
+
+void motor_set(float left, float right) {
+    set_single_motor(left, MOTOR_LEFT_CHANNEL, MOTOR_LEFT_IN2);
+    set_single_motor(right, MOTOR_RIGHT_CHANNEL, MOTOR_RIGHT_IN4);
 }
 
 void motor_stop(void) {
@@ -107,7 +98,8 @@ void motor_task(void *pvParameters) {
 
     while (1) {
         command_get(&cmd);
-        motor_set(cmd.left, cmd.right, cmd.dir);
+        ESP_LOGI("MTASK", "L=%.2f R=%.2f", cmd.left, cmd.right);
+        motor_set(cmd.left, cmd.right);
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

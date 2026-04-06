@@ -31,9 +31,9 @@ void app_main(void) {
         NULL
     ); // create a task to update the motors continuously (while(1) loop) from udp commands
 
-    while (1) {
+    /*while (1) {
     ESP_LOGI("TEST", "Forward 100%%");
-    motor_set(1.0, 1.0, 1);
+    motor_set(1.0, 1.0);
     vTaskDelay(pdMS_TO_TICKS(3000));
 
     ESP_LOGI("TEST", "Stop");
@@ -41,7 +41,7 @@ void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     ESP_LOGI("TEST", "Reverse 50%%");
-    motor_set(0.5, 0.5, -1);
+    motor_set(0.5, 0.5);
     vTaskDelay(pdMS_TO_TICKS(3000));
 
     ESP_LOGI("TEST", "Stop");
@@ -49,15 +49,15 @@ void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     ESP_LOGI("TEST", "Turn left (right motor only)");
-    motor_set(0.0, 0.7, 1);
+    motor_set(0.0, 0.7);
     vTaskDelay(pdMS_TO_TICKS(3000));
 
     ESP_LOGI("TEST", "Turn right (left motor only)");
-    motor_set(0.7, 0.0, 1);
+    motor_set(0.7, 0.0);
     vTaskDelay(pdMS_TO_TICKS(3000));
 
     ESP_LOGI("TEST", "Stop — restarting loop");
     motor_stop();
     vTaskDelay(pdMS_TO_TICKS(3000));
-    }
+    }*/
 }

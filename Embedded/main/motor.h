@@ -23,7 +23,7 @@
 
 // ── Public API ──
 esp_err_t motor_init(void);
-void motor_set(float left, float right, int dir);
+void motor_set(float left, float right);
 void motor_stop(void);
 void motor_task(void *pvParameters);
 

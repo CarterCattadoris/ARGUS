@@ -9,11 +9,10 @@ void command_init(void) {
     g_mutex = xSemaphoreCreateMutex();
 }
 
-void command_update(float left, float right, int dir, int64_t timestamp) {
+void command_update(float left, float right, int64_t timestamp) {
     xSemaphoreTake(g_mutex, portMAX_DELAY);
     g_cmd.left = left;
     g_cmd.right = right;
-    g_cmd.dir = dir;
     g_cmd.timestamp = timestamp;
     xSemaphoreGive(g_mutex);
 }
