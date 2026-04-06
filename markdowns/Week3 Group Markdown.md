@@ -69,8 +69,53 @@ Added `esp_driver_ledc` and `esp_driver_gpio` to `PRIV_REQUIRES` in `main/CMakeL
 
 ---
 
-## 2. 
----
+## 2. Ground Station Software — Motor Protocol Redesign & Integration Debugging
+
+**Owner: Lucas Le**
+
+### Critical Bug: Differential Drive Direction Logic
+
+Discovered a fundamental flaw in the motor command protocol. The original format used a single shared `"dir"` field (`{"left": 0.5, "right": 0.7, "dir": "fwd"}`), which cannot represent differential drive correctly. For example, a spin-in-place command (`left=-0.5, right=0.5`) would sum to zero, default to `"fwd"`, and send both motors forward — completely losing the turn.
+
+Redesigned the protocol to use per-motor signed floats: `{"left": 0.5, "right": -0.3}` where positive = forward and negative = reverse, independently per motor. This required coordinated changes across the full GCS call chain:
+
+- **`comms.py`** — Rewrote `send_motor_command(self, left, right)` to pass signed floats directly, removing the `dir` field and `abs()` stripping. Clamped values to [-1.0, 1.0].
+
+```python
+def send_motor_command(self, left, right):
+    left  = max(-1.0, min(1.0, left))
+    right = max(-1.0, min(1.0, right))
+    cmd = {
+        "left":  round(left, 3),
+        "right": round(right, 3),
+    }
+    return self._send(cmd)
+```
+
+- **`app.py`** — Updated all 5 call sites (`on_disconnect`, `handle_manual_drive`, `handle_manual_stop`, `handle_toggle_autopilot`, `control_loop`) to use the new 2-argument signed-float interface instead of passing magnitude + direction string.
+- **`pid_controller.py`** — Removed `abs()` clamping at the output stage that was silently converting all negative motor values to positive. Changed output clamp range from [0, 1] to [-1, 1] so reverse intent is preserved through the full PID → comms pipeline.
+
+### Additional Bugs Found & Fixed
+
+- **`send_motor_command` signature mismatch:** `comms.py` defined a 2-argument method but `app.py` called it with 3 arguments (`left, right, "fwd"`) at every call site — would have thrown `TypeError` at runtime.
+- **Missing `handle_toggle_autopilot`:** The SocketIO event handler function and its `@socketio.on` decorator were accidentally deleted during an edit, leaving bare code at module level referencing an undefined `engage` variable — crash on import. Restored the full function.
+- **Undefined `current_target` in control loop:** Waypoint tracking logic was replaced with a placeholder comment, so `autopilot.compute()` would hit a `NameError`. Restored the full waypoint progression block.
+- **`comms.py` indentation error:** `send_motor_command` was indented at 8 spaces (nested inside the previous function) instead of 4 spaces (class method level), causing a `SyntaxError` on import.
+
+### Control Loop: Watchdog Feed
+
+Added continuous `send_motor_command(0.0, 0.0)` in the 20Hz control loop when no manual or autopilot input is active, ensuring the ESP32's 500ms failsafe watchdog stays fed during idle periods.
+
+```python
+else:
+    # No active autopilot — send zeros if no manual input
+    if state["manual_command"] is None:
+        esp32.send_motor_command(0.0, 0.0)
+```
+
+### Config Audit
+
+Reviewed `config.py` against the actual hardware setup. Caught a misleading `# 1080p capture` comment on a 640×480 resolution setting, and a port mismatch between `comms.py`'s default (4210) and `config.py`'s actual value (9876).
 
 ## Current Firmware Status
 
@@ -92,3 +137,4 @@ Added `esp_driver_ledc` and `esp_driver_gpio` to `PRIV_REQUIRES` in `main/CMakeL
 - **Lucas:** Deploy YOLO model on Pi 5 via NCNN, integrate detection with Flask dashboard overlay, retrain model with fully assembled car images.
 - **Jon-Micheal:** PID autopilot controller implementation, dashboard telemetry and manual drive controls.
 - **Integration:** First full end-to-end test — manual drive from dashboard through Pi → UDP → ESP32 → motors, with YOLO tracking overlay on the live feed.
+
