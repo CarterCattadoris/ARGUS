@@ -16,10 +16,10 @@ class Config:
     JPEG_QUALITY = 70                    # MJPEG fallback quality
 
     # ── YOLO Detection ─────────────────────────
-    YOLO_MODEL_PATH = "models/best.pt"   # path to custom YOLOv11n weights
+    YOLO_MODEL_PATH = "../CustomYOLO/weights/best_ncnn_model"   # path to custom YOLOv11n weights
     YOLO_CONFIDENCE = 0.5                # min detection confidence
     YOLO_INPUT_SIZE = 416                # model input resolution
-    YOLO_CLASS_NAME = "rc_car"           # expected class label
+    YOLO_CLASS_NAME = "robot"           # expected class label
 
     # ── ArUco (fallback/calibration) ───────────
     ARUCO_DICT = "DICT_4X4_50"
