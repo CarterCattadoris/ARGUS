@@ -48,58 +48,81 @@ class FloorCalibrator:
     # ─────────────────────────────────────────────
     def calibrate(self, frame, robot_bbox=None):
         """
-        Snapshot the floor colour from *frame*.
+        Snapshot the floor colour from *frame* using multi-region sampling.
+        Samples a 3×3 grid of regions across the frame to capture lighting
+        variation (vignetting, gradient), then computes bounds that encompass
+        all regions.
 
         Args:
             frame:      BGR image (numpy array).
             robot_bbox: Optional (x1, y1, x2, y2) to mask out the robot.
         """
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        blurred = cv2.GaussianBlur(frame, (15, 15), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        fh, fw = hsv.shape[:2]
 
-        # Build a mask that excludes the robot (if detected)
-        mask = np.ones(hsv.shape[:2], dtype=np.uint8) * 255
+        # Build robot exclusion mask
+        robot_mask = np.zeros((fh, fw), dtype=bool)
         if robot_bbox is not None:
             x1, y1, x2, y2 = [int(v) for v in robot_bbox]
-            # Expand bbox slightly to be safe
-            pad = 20
+            pad = 30
             x1 = max(0, x1 - pad)
             y1 = max(0, y1 - pad)
-            x2 = min(frame.shape[1], x2 + pad)
-            y2 = min(frame.shape[0], y2 + pad)
-            mask[y1:y2, x1:x2] = 0
+            x2 = min(fw, x2 + pad)
+            y2 = min(fh, y2 + pad)
+            robot_mask[y1:y2, x1:x2] = True
 
-        # Collect valid pixels
-        pixels = hsv[mask > 0].reshape(-1, 3).astype(np.float32)
+        # Sample from a 3×3 grid of regions across the frame
+        region_size_x = fw // 6  # each region is ~1/6 of frame width
+        region_size_y = fh // 6
+        grid_positions = []
+        for gy in range(3):
+            for gx in range(3):
+                cx = int((gx + 0.5) * fw / 3)
+                cy = int((gy + 0.5) * fh / 3)
+                grid_positions.append((cx, cy))
 
-        if len(pixels) < 100:
-            log.warning("Not enough pixels for floor calibration")
+        all_medians = []  # median HSV from each region
+
+        for cx, cy in grid_positions:
+            rx1 = max(0, cx - region_size_x)
+            ry1 = max(0, cy - region_size_y)
+            rx2 = min(fw, cx + region_size_x)
+            ry2 = min(fh, cy + region_size_y)
+
+            region_hsv = hsv[ry1:ry2, rx1:rx2]
+            region_robot = robot_mask[ry1:ry2, rx1:rx2]
+
+            # Exclude robot pixels
+            valid_pixels = region_hsv[~region_robot]
+            if len(valid_pixels) < 50:
+                continue
+
+            median_h = np.median(valid_pixels[:, 0])
+            median_s = np.median(valid_pixels[:, 1])
+            median_v = np.median(valid_pixels[:, 2])
+            all_medians.append((median_h, median_s, median_v))
+
+        if not all_medians:
+            log.warning("Not enough valid regions for calibration")
             return False
 
-        # K-Means with k=3 — pick the largest cluster as floor
-        k = min(3, len(pixels) // 50)
-        k = max(1, k)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-        _, labels, centres = cv2.kmeans(
-            pixels, k, None, criteria, 5, cv2.KMEANS_PP_CENTERS
-        )
+        medians = np.array(all_medians)
 
-        # Find largest cluster
-        counts = np.bincount(labels.flatten(), minlength=k)
-        dominant_idx = counts.argmax()
-        floor_hsv = centres[dominant_idx].astype(np.uint8)
-
-        # Compute bounds
+        # Compute bounds that encompass all regions + tolerance
         h_tol, s_tol, v_tol = self._hsv_tolerance
         lower = np.array([
-            max(0, int(floor_hsv[0]) - h_tol),
-            max(0, int(floor_hsv[1]) - s_tol),
-            max(0, int(floor_hsv[2]) - v_tol),
+            max(0, int(np.min(medians[:, 0])) - h_tol),
+            max(0, int(np.min(medians[:, 1])) - s_tol),
+            max(0, int(np.min(medians[:, 2])) - v_tol),
         ], dtype=np.uint8)
         upper = np.array([
-            min(179, int(floor_hsv[0]) + h_tol),
-            min(255, int(floor_hsv[1]) + s_tol),
-            min(255, int(floor_hsv[2]) + v_tol),
+            min(179, int(np.max(medians[:, 0])) + h_tol),
+            min(255, int(np.max(medians[:, 1])) + s_tol),
+            min(255, int(np.max(medians[:, 2])) + v_tol),
         ], dtype=np.uint8)
+
+        floor_hsv = np.median(medians, axis=0).astype(np.uint8)
 
         with self._lock:
             self._floor_hsv = tuple(int(v) for v in floor_hsv)
@@ -108,7 +131,7 @@ class FloorCalibrator:
             self._calibrated = True
 
         log.info(
-            f"Floor calibrated: HSV=({self._floor_hsv}), "
+            f"Floor calibrated (multi-region): HSV=({self._floor_hsv}), "
             f"range=[{lower.tolist()} – {upper.tolist()}]"
         )
         return True
