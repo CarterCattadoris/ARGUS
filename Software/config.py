@@ -61,9 +61,16 @@ class Config:
     HEADING_TOLERANCE_DEG = 5.0          # degrees of acceptable heading error
 
     # ── Arena ──────────────────────────────────
-    ARENA_WIDTH_M = 1.524        # 5 ft (1.524 meters)
-    ARENA_HEIGHT_M = 2.1336      # 7 ft (2.1336 meters)
+    ARENA_WIDTH_M = 2.11       # 5 ft (1.524 meters)
+    ARENA_HEIGHT_M = 1.90      # 7 ft (2.1336 meters)
 
     # ── Tracking ───────────────────────────────
     POSITION_HISTORY_LENGTH = 50         # frames of position history for trail
     VELOCITY_WINDOW = 5                  # frames for velocity estimation
+
+    # ── Obstacle Avoidance ─────────────────────
+    FLOOR_HSV_TOLERANCE = (25, 100, 50)   # (H, S, V) tolerance — V kept tight to catch dark objects
+    GRID_CELL_SIZE_M = 0.05             # 5cm occupancy grid cells
+    ROBOT_CLEARANCE_CELLS = 4           # inflate obstacles by 4 cells (~20cm) — keeps robot visible to YOLO
+    OBSTACLE_REPLAN_INTERVAL = 1.0      # re-run A* at most once per second
+    OBSTACLE_DETECT_INTERVAL = 3        # run obstacle detection every N capture frames

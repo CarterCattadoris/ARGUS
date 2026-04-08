@@ -1,7 +1,8 @@
 """
 ARGUS — Computer Vision Pipeline
 Handles camera capture, YOLOv11n detection, object tracking,
-coordinate mapping (pixel → world), and WebRTC video streaming.
+coordinate mapping (pixel → world), obstacle detection, and
+video streaming.
 """
 
 import cv2
@@ -11,6 +12,7 @@ import threading
 import logging
 import math
 from collections import deque
+from obstacle_detection import FloorCalibrator, ObstacleDetector
 
 log = logging.getLogger("argus.cv")
 
@@ -45,6 +47,12 @@ class CVPipeline:
         self._dist_coeffs = None
 
 
+        # Obstacle detection
+        self._floor_calibrator = FloorCalibrator()
+        self._obstacle_detector = None  # initialised after calibration
+        self._obstacle_frame_counter = 0
+        self._astar_path_world = []     # latest A* path in world coords
+        self._astar_path_lock = threading.Lock()
 
         # Thread control
         self._running = False
@@ -54,12 +62,18 @@ class CVPipeline:
     # Startup
     # ──────────────────────────────────────────
     def start(self):
-        """Open camera, load model, load calibration, start capture thread."""
+        """Open camera, load model, load calibration, init obstacle detector, start capture thread."""
         self._open_camera()
         self._load_model()
         self._load_calibration()
+
+        # Initialise obstacle detector (needs pixel_to_world)
+        self._obstacle_detector = ObstacleDetector(
+            calibrator=self._floor_calibrator,
+            pixel_to_world_fn=self.pixel_to_world,
+        )
+
         self._running = True
-        
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
 
@@ -210,6 +224,15 @@ class CVPipeline:
                 # Estimate velocity from position history
                 detection["speed"] = self._estimate_speed()
                 detection["velocity_heading"] = self._estimate_velocity_heading()
+
+            # Run obstacle detection periodically (not every frame for perf)
+            from config import Config
+            self._obstacle_frame_counter += 1
+            if (self._floor_calibrator.calibrated and
+                    self._obstacle_detector is not None and
+                    self._obstacle_frame_counter % Config.OBSTACLE_DETECT_INTERVAL == 0):
+                robot_bbox = detection["bbox"] if detection else None
+                self._obstacle_detector.detect(frame, robot_bbox=robot_bbox)
 
             # Draw overlays on frame
             annotated = self._draw_overlays(frame, detection)
@@ -400,6 +423,35 @@ class CVPipeline:
             px, py = self.world_to_pixel(nav_tgt[0], nav_tgt[1])
             cv2.circle(annotated, (int(px), int(py)), 6, (0, 255, 255), -1, cv2.LINE_AA)
 
+        # Draw debris overlay (semi-transparent red contours)
+        if self._floor_calibrator.calibrated and self._obstacle_detector is not None:
+            debris_mask = self._obstacle_detector.get_debris_mask()
+            if debris_mask is not None:
+                # Find contours and draw them
+                contours, _ = cv2.findContours(
+                    debris_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                if contours:
+                    overlay = annotated.copy()
+                    cv2.drawContours(overlay, contours, -1, (0, 0, 220), cv2.FILLED)
+                    cv2.addWeighted(overlay, 0.25, annotated, 0.75, 0, annotated)
+                    cv2.drawContours(annotated, contours, -1, (0, 0, 220), 1, cv2.LINE_AA)
+
+        # Draw A* avoidance path (green)
+        with self._astar_path_lock:
+            astar_pts = list(self._astar_path_world)
+        if len(astar_pts) > 1:
+            pixel_pts = []
+            for wp in astar_pts:
+                px, py = self.world_to_pixel(wp[0], wp[1])
+                pixel_pts.append((int(px), int(py)))
+            for i in range(1, len(pixel_pts)):
+                cv2.line(annotated, pixel_pts[i - 1], pixel_pts[i],
+                         (0, 220, 0), 2, cv2.LINE_AA)
+            # Draw small circles at waypoints
+            for pt in pixel_pts:
+                cv2.circle(annotated, pt, 3, (0, 220, 0), -1, cv2.LINE_AA)
+
         return annotated
 
     # ──────────────────────────────────────────
@@ -409,9 +461,56 @@ class CVPipeline:
         with self._frame_lock:
             self._nav_waypoints = list(waypoints) if waypoints else []
             self._nav_target = target
+
+    def set_astar_path(self, path):
+        """Set the A* avoidance path for overlay drawing."""
+        with self._astar_path_lock:
+            self._astar_path_world = list(path) if path else []
+
     def get_latest_detection(self):
         with self._frame_lock:
             return self._latest_detection
+
+    def calibrate_floor(self):
+        """
+        Capture a snapshot of the current frame and calibrate floor colour.
+        Returns True on success.
+        """
+        with self._frame_lock:
+            frame = self._latest_frame
+
+        if frame is None:
+            log.warning("Cannot calibrate floor — no frame available")
+            return False
+
+        # Get robot bbox if available
+        det = self.get_latest_detection()
+        robot_bbox = det["bbox"] if det else None
+
+        success = self._floor_calibrator.calibrate(frame, robot_bbox=robot_bbox)
+        if success:
+            log.info("Floor calibration successful")
+        return success
+
+    def get_occupancy_grid(self):
+        """Return the current occupancy grid, or None if not available."""
+        if self._obstacle_detector is None:
+            return None
+        return self._obstacle_detector.get_occupancy_grid()
+
+    def get_obstacle_detector(self):
+        """Return the ObstacleDetector instance."""
+        return self._obstacle_detector
+
+    def get_obstacle_count(self):
+        """Return number of occupied cells."""
+        if self._obstacle_detector is None:
+            return 0
+        return self._obstacle_detector.get_obstacle_count()
+
+    def is_floor_calibrated(self):
+        """Return whether the floor has been calibrated."""
+        return self._floor_calibrator.calibrated
 
     def get_jpeg_frame(self):
         """Get latest annotated frame as JPEG bytes (MJPEG fallback)."""

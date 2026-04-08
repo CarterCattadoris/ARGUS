@@ -19,6 +19,7 @@ from cv_pipeline import CVPipeline
 from pid_controller import PIDAutopilot
 from comms import ESP32Comms, find_esp32_by_mac
 from config import Config
+from astar import find_path_world, find_path_along_waypoints, is_path_blocked
 
 # ──────────────────────────────────────────────
 # Logging
@@ -83,6 +84,7 @@ state = {
     "target": None,          # (x_m, y_m) in world coords
     "waypoints": [],         # list of (x_m, y_m) for drawn paths
     "manual_command": None,  # latest manual drive command
+    "astar_waypoints": [],   # auto-generated avoidance waypoints
 }
 state_lock = threading.Lock()
 
@@ -217,6 +219,19 @@ def handle_toggle_autopilot(data):
     emit("autopilot_state", {"engaged": engage})
 
 
+@socketio.on("calibrate_floor")
+def handle_calibrate_floor():
+    """Capture floor colour profile for obstacle detection."""
+    log.info("Floor calibration requested from dashboard")
+    success = cv_pipeline.calibrate_floor()
+    if success:
+        emit("floor_calibration_status", {"success": True})
+        log.info("Floor calibration successful")
+    else:
+        emit("floor_calibration_status", {"success": False})
+        log.warning("Floor calibration failed")
+
+
 @socketio.on("set_target")
 def handle_set_target(data):
     """
@@ -306,6 +321,9 @@ def control_loop():
     global_yaw = None
     last_yaw_time = time.time()
 
+    # A* replanning throttle
+    last_replan_time = 0.0
+
     while True:
         t_start = time.time()
 
@@ -356,24 +374,78 @@ def control_loop():
             ap_engaged = state["autopilot_engaged"]
             target = state["target"]
             waypoints = list(state["waypoints"])
+            astar_waypoints = list(state["astar_waypoints"])
             
         cv_pipeline.set_nav_data(waypoints, target)
 
+        # ── A* obstacle avoidance replanning ──
+        # Only replan if: we have no path, OR the current path is blocked
+        if (ap_engaged and position is not None and target is not None
+                and cv_pipeline.is_floor_calibrated()
+                and t_start - last_replan_time >= Config.OBSTACLE_REPLAN_INTERVAL):
+            last_replan_time = t_start
+            grid = cv_pipeline.get_occupancy_grid()
+            detector = cv_pipeline.get_obstacle_detector()
+            if grid is not None and detector is not None:
+                needs_replan = (
+                    not astar_waypoints or  # no path yet
+                    is_path_blocked(grid, astar_waypoints, detector)  # current path hits obstacle
+                )
+                if needs_replan:
+                    if waypoints:
+                        # User drew a path — route A* along their waypoints,
+                        # only detouring around obstacles on blocked segments
+                        path = find_path_along_waypoints(
+                            grid, position, waypoints, target, detector
+                        )
+                    else:
+                        # No drawn path — find shortest route to target
+                        path = find_path_world(grid, position, target, detector)
+
+                    if path and len(path) >= 2:
+                        with state_lock:
+                            state["astar_waypoints"] = path
+                        astar_waypoints = path
+                        cv_pipeline.set_astar_path(path)
+                    else:
+                        with state_lock:
+                            state["astar_waypoints"] = []
+                        astar_waypoints = []
+                        cv_pipeline.set_astar_path([])
+
+        # Determine which waypoints to follow (A* takes priority when available)
+        active_waypoints = astar_waypoints if astar_waypoints else waypoints
+
         if ap_engaged and position is not None and heading is not None and target is not None:
             # Determine current waypoint target
-            if waypoints:
-                current_target = waypoints[0]
+            if active_waypoints:
+                current_target = active_waypoints[0]
                 dx = current_target[0] - position[0]
                 dy = current_target[1] - position[1]
                 dist = (dx * dx + dy * dy) ** 0.5
-                if dist < Config.WAYPOINT_REACH_THRESHOLD:
-                    with state_lock:
-                        if state["waypoints"]:
-                            state["waypoints"].pop(0)
+                # A* waypoints use a larger reach threshold (they're navigation hints, not precision targets)
+                reach = 0.12 if astar_waypoints else Config.WAYPOINT_REACH_THRESHOLD
+                if dist < reach:
+                    # Pop from whichever list is active
+                    if astar_waypoints:
+                        with state_lock:
+                            if state["astar_waypoints"]:
+                                state["astar_waypoints"].pop(0)
+                                if state["astar_waypoints"]:
+                                    current_target = state["astar_waypoints"][0]
+                                else:
+                                    # A* path done — also clear drawn waypoints
+                                    # (A* already incorporated them)
+                                    state["waypoints"] = []
+                                    current_target = target
+                    else:
+                        with state_lock:
                             if state["waypoints"]:
-                                current_target = state["waypoints"][0]
-                            else:
-                                current_target = target
+                                state["waypoints"].pop(0)
+                                if state["waypoints"]:
+                                    current_target = state["waypoints"][0]
+                                else:
+                                    current_target = target
             else:
                 current_target = target
 
@@ -440,6 +512,10 @@ def control_loop():
                 "esp32": esp32.is_connected(),
                 "camera": cv_pipeline.is_camera_open(),
                 "imu": esp32.imu_active,
+            },
+            "obstacles": {
+                "calibrated": cv_pipeline.is_floor_calibrated(),
+                "count": cv_pipeline.get_obstacle_count(),
             },
         }
 
