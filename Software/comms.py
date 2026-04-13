@@ -187,6 +187,17 @@ class ESP32Comms:
         if self._sock is None:
             return False
 
+        # Apply calibrated motor trim
+        try:
+            from app import cal_lock, cal_state
+            with cal_lock:
+                trim = cal_state["motor_trim"]
+            if trim != 0.0 and (abs(left) > 0.01 or abs(right) > 0.01):
+                left  = left + trim
+                right = right - trim
+        except ImportError:
+            pass  # not running from app context
+
         left  = max(-1.0, min(1.0, left))
         right = max(-1.0, min(1.0, right))
 

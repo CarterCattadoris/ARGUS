@@ -148,11 +148,9 @@ def find_path_world(grid, start_world, goal_world, detector):
     # Convert to world coordinates
     world_path = [detector.grid_to_world(r, c) for r, c in cell_path]
 
-    # Simplify: Ramer-Douglas-Peucker removes redundant points,
-    # keeping only key turning points
-    simplified = _rdp_simplify(world_path, epsilon=0.08)  # 8cm tolerance for smoother paths
-
-    return simplified
+    # Simplify to remove grid artifacts, but defer smoothing to the final path assembler
+    # so we don't accidentally run RDP point deletion on already-smoothed curves.
+    return _rdp_simplify(world_path, epsilon=0.04)
 
 
 def find_path_along_waypoints(grid, start_world, waypoints, target, detector):
@@ -175,31 +173,54 @@ def find_path_along_waypoints(grid, start_world, waypoints, target, detector):
     #   robot → waypoint[0] → waypoint[1] → ... → target
     checkpoints = list(waypoints) + [target]
 
-    full_path = []
+    full_path = [start_world]
     current = start_world
 
-    for checkpoint in checkpoints:
-        # Check if the direct segment is blocked
+    i = 0
+    while i < len(checkpoints):
+        checkpoint = checkpoints[i]
+
         segment_blocked = _is_segment_blocked(grid, current, checkpoint, detector)
 
         if segment_blocked:
-            # Run A* for this segment
-            sub_path = find_path_world(grid, current, checkpoint, detector)
-            if sub_path:
-                # Skip the first point (it's the current position, already in path)
-                if full_path:
-                    sub_path = sub_path[1:]
-                full_path.extend(sub_path)
+            # We hit an obstacle. The user's path might have many points inside it.
+            # Look ahead for the FIRST checkpoint that is completely free in the grid
+            # so we only route *around* the obstacle once, instead of zig-zagging inside.
+            j = i
+            while j < len(checkpoints):
+                r, c = detector.world_to_grid(checkpoints[j][0], checkpoints[j][1])
+                if grid[r, c] == 0:
+                    break
+                j += 1
+            
+            if j == len(checkpoints):
+                # Everything left is inside the obstacle, just route A* to the target
+                sub_path = find_path_world(grid, current, checkpoints[-1], detector)
+                if sub_path:
+                    full_path.extend(sub_path)
+                break
             else:
-                # No path found — just add the checkpoint directly
-                full_path.append(checkpoint)
+                # checkpoints[j] is the first free point after the obstacle
+                sub_path = find_path_world(grid, current, checkpoints[j], detector)
+                if sub_path:
+                    full_path.extend(sub_path)
+                    current = checkpoints[j]
+                else:
+                    # Fallback
+                    full_path.append(checkpoints[j])
+                    current = checkpoints[j]
+                # Skip the iterator past all the blocked intermediate waypoints
+                i = j + 1
         else:
-            # Segment is clear — go direct
+            # Segment is clear
             full_path.append(checkpoint)
+            current = checkpoint
+            i += 1
 
-        current = checkpoint
-
-    return full_path
+    # Final pass simplification across stitched segments.
+    # We use a very tight 2.5cm threshold to prevent it from clipping/connecting
+    # short U-turns across themselves, retaining full user-drawn curves before smoothing.
+    return _smooth_path(_rdp_simplify(full_path, epsilon=0.025), iterations=2)
 
 
 def _is_segment_blocked(grid, start_world, end_world, detector):
@@ -287,4 +308,29 @@ def is_path_blocked(grid, path_world, detector):
         if 0 <= r < rows and 0 <= c < cols and grid[r, c] == 1:
             return True
     return False
+
+def _smooth_path(points, iterations=1):
+    """
+    Smooth a polygonal path using Chaikin's Corner Cutting algorithm.
+    Takes sharp edges and slices off the corners recursively locally turning them into curves.
+    """
+    if len(points) <= 2:
+        return points
+    
+    smoothed = points
+    for _ in range(iterations):
+        new_points = [smoothed[0]]
+        for i in range(len(smoothed) - 1):
+            p0 = smoothed[i]
+            p1 = smoothed[i+1]
+            
+            # Create two new points at 25% and 75% along the segment
+            Q = (0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1])
+            R = (0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1])
+            new_points.extend([Q, R])
+            
+        new_points.append(smoothed[-1])
+        smoothed = new_points
+        
+    return smoothed
 

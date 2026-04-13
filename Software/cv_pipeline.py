@@ -45,24 +45,32 @@ class CVPipeline:
         self._homography = None  # 3x3 pixel→world transform
         self._camera_matrix = None
         self._dist_coeffs = None
-
+        self._undistort_map1 = None  # precomputed remap LUTs
+        self._undistort_map2 = None
 
         # Obstacle detection
         self._floor_calibrator = FloorCalibrator()
         self._obstacle_detector = None  # initialised after calibration
         self._obstacle_frame_counter = 0
+        self._cached_debris_contours = []  # cached from detector for overlay
         self._astar_path_world = []     # latest A* path in world coords
         self._astar_path_lock = threading.Lock()
 
         # Thread control
         self._running = False
         self._capture_thread = None
+        self._camera_thread = None
+        self._raw_frame = None  # latest frame from camera grab thread
+
+        # Timing metrics
+        self._metrics_lock = threading.Lock()
+        self.metrics = {"cv_fps": 0.0, "inference_ms": 0.0, "other_ms": 0.0}
 
     # ──────────────────────────────────────────
     # Startup
     # ──────────────────────────────────────────
     def start(self):
-        """Open camera, load model, load calibration, init obstacle detector, start capture thread."""
+        """Open camera, load model, load calibration, init obstacle detector, start threads."""
         self._open_camera()
         self._load_model()
         self._load_calibration()
@@ -74,11 +82,19 @@ class CVPipeline:
         )
 
         self._running = True
+
+        # Camera grab thread — continuously reads frames so cap.read()
+        # never blocks the processing loop
+        self._camera_thread = threading.Thread(target=self._camera_grab_loop, daemon=True)
+        self._camera_thread.start()
+
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
 
     def stop(self):
         self._running = False
+        if self._camera_thread:
+            self._camera_thread.join(timeout=3)
         if self._capture_thread:
             self._capture_thread.join(timeout=3)
         if self._cap:
@@ -139,6 +155,14 @@ class CVPipeline:
             self._camera_matrix = data["camera_matrix"]
             self._dist_coeffs = data["dist_coeffs"]
             log.info("Camera calibration loaded")
+
+            # Precompute undistort remap LUTs (much faster than cv2.undistort per frame)
+            h, w = self.resolution[1], self.resolution[0]
+            self._undistort_map1, self._undistort_map2 = cv2.initUndistortRectifyMap(
+                self._camera_matrix, self._dist_coeffs, None,
+                self._camera_matrix, (w, h), cv2.CV_16SC2,
+            )
+            log.info("Undistort remap LUTs precomputed")
         except FileNotFoundError:
             log.warning("No camera calibration found — using uncalibrated mode")
 
@@ -186,32 +210,58 @@ class CVPipeline:
         return (float(px), float(py))
 
     # ──────────────────────────────────────────
-    # Capture + Detection Loop
+    # Camera Grab Thread
     # ──────────────────────────────────────────
-    def _capture_loop(self):
-        """Continuous capture → detect → track loop."""
-        log.info("Capture loop started")
-
+    def _camera_grab_loop(self):
+        """Continuously grab frames from camera into a buffer.
+        Runs in its own thread so cap.read() blocking never stalls
+        the processing loop."""
+        log.info("Camera grab thread started")
         while self._running:
             if not self.is_camera_open():
-                time.sleep(0.5)
-                self._open_camera()
+                time.sleep(0.1)
                 continue
-
             with self._cap_lock:
                 ret, frame = self._cap.read()
+            if ret and frame is not None:
+                with self._frame_lock:
+                    self._raw_frame = frame
+            else:
+                time.sleep(0.001)
+        log.info("Camera grab thread stopped")
 
-            if not ret or frame is None:
-                log.warning("Frame capture failed")
-                time.sleep(0.03)
+    # ──────────────────────────────────────────
+    # Processing Loop
+    # ──────────────────────────────────────────
+    def _capture_loop(self):
+        """Continuous detect → track → overlay loop."""
+        log.info("Capture loop started")
+        
+        loop_time = time.time()
+        fps_counter = 0
+        fps_t0 = time.time()
+        
+        while self._running:
+            # Grab latest frame from camera thread (non-blocking)
+            with self._frame_lock:
+                frame = self._raw_frame
+                self._raw_frame = None
+
+            if frame is None:
+                time.sleep(0.001)  # no frame yet, yield briefly
                 continue
 
-            # Undistort if calibrated
-            if self._camera_matrix is not None and self._dist_coeffs is not None:
-                frame = cv2.undistort(frame, self._camera_matrix, self._dist_coeffs)
+            # Start of loop timing
+            t_start = time.time()
 
+            # Undistort if calibrated (use precomputed remap LUTs)
+            if self._undistort_map1 is not None:
+                frame = cv2.remap(frame, self._undistort_map1, self._undistort_map2, cv2.INTER_LINEAR)
+
+            t_pre = time.time()
             # Run YOLO detection
             detection = self._detect(frame)
+            t_infer = time.time()
 
             # Update tracking history
             t_now = time.time()
@@ -221,9 +271,10 @@ class CVPipeline:
                 )
                 self._detection_times.append(t_now)
 
-                # Estimate velocity from position history
-                detection["speed"] = self._estimate_speed()
-                detection["velocity_heading"] = self._estimate_velocity_heading()
+                # Estimate velocity from position history (single pass)
+                speed, vel_heading = self._estimate_velocity()
+                detection["speed"] = speed
+                detection["velocity_heading"] = vel_heading
 
             # Run obstacle detection periodically (not every frame for perf)
             from config import Config
@@ -233,9 +284,27 @@ class CVPipeline:
                     self._obstacle_frame_counter % Config.OBSTACLE_DETECT_INTERVAL == 0):
                 robot_bbox = detection["bbox"] if detection else None
                 self._obstacle_detector.detect(frame, robot_bbox=robot_bbox)
+                # Cache contours for overlay (avoids re-running findContours every frame)
+                self._cached_debris_contours = self._obstacle_detector.get_debris_contours()
 
             # Draw overlays on frame
             annotated = self._draw_overlays(frame, detection)
+
+            t_post = time.time()
+            
+            # Timing calculations
+            inference_ms = (t_infer - t_pre) * 1000.0
+            other_ms = (t_pre - t_start + t_post - t_infer) * 1000.0
+            
+            fps_counter += 1
+            if t_post - fps_t0 >= 1.0:
+                cv_fps = fps_counter / (t_post - fps_t0)
+                fps_counter = 0
+                fps_t0 = t_post
+                with self._metrics_lock:
+                    self.metrics["cv_fps"] = cv_fps
+                    self.metrics["inference_ms"] = inference_ms
+                    self.metrics["other_ms"] = other_ms
 
             # Store latest
             with self._frame_lock:
@@ -290,17 +359,24 @@ class CVPipeline:
             "velocity_heading": None,
         }
 
-    def _estimate_speed(self):
-        """Estimate speed in m/s from recent position history."""
+    def _estimate_velocity(self):
+        """
+        Estimate speed (m/s) and heading (degrees, 0=north/up, CW) from
+        recent position history.  Single pass — converts pixel positions
+        to world coordinates once and computes both values.
+
+        Returns:
+            (speed, heading) tuple.  heading may be None if too slow.
+        """
         from config import Config
         n = min(Config.VELOCITY_WINDOW, len(self._position_history))
         if n < 2:
-            return 0.0
+            return 0.0, None
 
         positions = list(self._position_history)[-n:]
         times = list(self._detection_times)[-n:]
 
-        # Convert pixel positions to world if possible
+        # Convert pixel positions to world (single pass, shared by speed + heading)
         world_positions = []
         for px, py in positions:
             wc = self.pixel_to_world(px, py)
@@ -308,8 +384,9 @@ class CVPipeline:
                 world_positions.append(wc)
 
         if len(world_positions) < 2:
-            return 0.0
+            return 0.0, None
 
+        # Speed: total distance / elapsed time
         total_dist = 0.0
         for i in range(1, len(world_positions)):
             dx = world_positions[i][0] - world_positions[i - 1][0]
@@ -317,43 +394,26 @@ class CVPipeline:
             total_dist += math.sqrt(dx * dx + dy * dy)
 
         dt = times[-1] - times[0]
-        if dt <= 0:
-            return 0.0
+        speed = total_dist / dt if dt > 0 else 0.0
 
-        return total_dist / dt
-
-    def _estimate_velocity_heading(self):
-        """Estimate heading from velocity vector (degrees, 0=north/up, CW)."""
-        from config import Config
-        n = min(Config.VELOCITY_WINDOW, len(self._position_history))
-        if n < 2:
-            return None
-
-        positions = list(self._position_history)[-n:]
-        world_positions = []
-        for px, py in positions:
-            wc = self.pixel_to_world(px, py)
-            if wc:
-                world_positions.append(wc)
-
-        if len(world_positions) < 2:
-            return None
-
+        # Heading: velocity vector from first to last world position
         dx = world_positions[-1][0] - world_positions[0][0]
         dy = world_positions[-1][1] - world_positions[0][1]
 
         if abs(dx) < 0.005 and abs(dy) < 0.005:
-            return None  # too slow to estimate
+            return speed, None  # too slow to estimate heading
 
         heading = math.degrees(math.atan2(dx, -dy)) % 360
-        return heading
+        return speed, heading
 
     # ──────────────────────────────────────────
     # Overlays
     # ──────────────────────────────────────────
     def _draw_overlays(self, frame, detection):
-        """Draw bounding box, trail, heading vector on frame."""
-        annotated = frame.copy()
+        """Draw bounding box, trail, heading vector on frame.
+        Draws directly on the input frame (no copy) since the frame
+        is consumed after this and not reused."""
+        annotated = frame  # no copy — frame is consumed
 
         # Draw position trail
         if len(self._position_history) > 1:
@@ -408,36 +468,52 @@ class CVPipeline:
 
         # Draw navigation path
         nav_pts = getattr(self, "_nav_waypoints", [])
+        initial_pts = getattr(self, "_initial_waypoints", [])
         nav_tgt = getattr(self, "_nav_target", None)
 
-        if nav_pts:
+        if initial_pts:
             hw_pts = []
-            for wp in nav_pts:
+            for wp in initial_pts:
                 px, py = self.world_to_pixel(wp[0], wp[1])
                 hw_pts.append((int(px), int(py)))
             
-            for i in range(1, len(hw_pts)):
-                cv2.line(annotated, hw_pts[i-1], hw_pts[i], (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.circle(annotated, hw_pts[-1], 6, (0, 255, 255), -1, cv2.LINE_AA)
+            # Find the index separating completed vs pending waypoints
+            split_idx = 0
+            if nav_pts:
+                # The first unvisited target point
+                active_start = nav_pts[0]
+                for i, wp in enumerate(initial_pts):
+                    if wp == active_start:
+                        split_idx = i
+                        break
+            elif nav_tgt:
+                # Target was reached, entire path is complete
+                split_idx = len(initial_pts) - 1
+
+            # Draw visited segments in Green (0, 220, 0)
+            for i in range(1, split_idx + 1):
+                cv2.line(annotated, hw_pts[i-1], hw_pts[i], (0, 220, 0), 2, cv2.LINE_AA)
+            
+            # Draw remaining segments in Red (0, 0, 255)
+            for i in range(max(1, split_idx), len(hw_pts)):
+                cv2.line(annotated, hw_pts[i-1], hw_pts[i], (0, 0, 255), 2, cv2.LINE_AA)
+                
+            # Target endpoint circle in Red
+            cv2.circle(annotated, hw_pts[-1], 6, (0, 0, 255), -1, cv2.LINE_AA)
         elif nav_tgt:
             px, py = self.world_to_pixel(nav_tgt[0], nav_tgt[1])
-            cv2.circle(annotated, (int(px), int(py)), 6, (0, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(annotated, (int(px), int(py)), 6, (0, 0, 255), -1, cv2.LINE_AA)
 
-        # Draw debris overlay (semi-transparent red contours)
-        if self._floor_calibrator.calibrated and self._obstacle_detector is not None:
-            debris_mask = self._obstacle_detector.get_debris_mask()
-            if debris_mask is not None:
-                # Find contours and draw them
-                contours, _ = cv2.findContours(
-                    debris_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                )
-                if contours:
-                    overlay = annotated.copy()
-                    cv2.drawContours(overlay, contours, -1, (0, 0, 220), cv2.FILLED)
-                    cv2.addWeighted(overlay, 0.25, annotated, 0.75, 0, annotated)
-                    cv2.drawContours(annotated, contours, -1, (0, 0, 220), 1, cv2.LINE_AA)
+        # Draw debris overlay using cached contours (avoids re-running
+        # findContours and get_debris_mask every frame)
+        contours = self._cached_debris_contours
+        if contours:
+            overlay = annotated.copy()
+            cv2.drawContours(overlay, contours, -1, (0, 0, 220), cv2.FILLED)
+            cv2.addWeighted(overlay, 0.25, annotated, 0.75, 0, annotated)
+            cv2.drawContours(annotated, contours, -1, (0, 0, 220), 1, cv2.LINE_AA)
 
-        # Draw A* avoidance path (green)
+        # Draw A* avoidance path (transparent light gray)
         with self._astar_path_lock:
             astar_pts = list(self._astar_path_world)
         if len(astar_pts) > 1:
@@ -445,22 +521,28 @@ class CVPipeline:
             for wp in astar_pts:
                 px, py = self.world_to_pixel(wp[0], wp[1])
                 pixel_pts.append((int(px), int(py)))
+            
+            overlay = annotated.copy()
             for i in range(1, len(pixel_pts)):
-                cv2.line(annotated, pixel_pts[i - 1], pixel_pts[i],
-                         (0, 220, 0), 2, cv2.LINE_AA)
+                cv2.line(overlay, pixel_pts[i - 1], pixel_pts[i],
+                         (0, 255, 255), 2, cv2.LINE_AA)
             # Draw small circles at waypoints
             for pt in pixel_pts:
-                cv2.circle(annotated, pt, 3, (0, 220, 0), -1, cv2.LINE_AA)
+                cv2.circle(overlay, pt, 2, (0, 255, 255), -1, cv2.LINE_AA)
+                
+            # Blend the overlay with 30% opacity for the lines
+            cv2.addWeighted(overlay, 0.3, annotated, 0.7, 0, annotated)
 
         return annotated
 
     # ──────────────────────────────────────────
     # Public accessors
     # ──────────────────────────────────────────
-    def set_nav_data(self, waypoints, target):
+    def set_nav_data(self, waypoints, target, initial_waypoints=None):
         with self._frame_lock:
             self._nav_waypoints = list(waypoints) if waypoints else []
             self._nav_target = target
+            self._initial_waypoints = list(initial_waypoints) if initial_waypoints else []
 
     def set_astar_path(self, path):
         """Set the A* avoidance path for overlay drawing."""

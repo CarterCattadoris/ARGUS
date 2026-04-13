@@ -12,6 +12,7 @@ import time
 import json
 import threading
 import logging
+import numpy as np
 from flask import Flask, render_template, Response, request
 from flask_socketio import SocketIO, emit
 
@@ -83,10 +84,24 @@ state = {
     "autopilot_engaged": False,
     "target": None,          # (x_m, y_m) in world coords
     "waypoints": [],         # list of (x_m, y_m) for drawn paths
+    "initial_waypoints": [], # memory of the full initial drawn path for progress UI
     "manual_command": None,  # latest manual drive command
     "astar_waypoints": [],   # auto-generated avoidance waypoints
 }
 state_lock = threading.Lock()
+
+# Calibration state (accessed by control loop thread)
+cal_lock = threading.Lock()
+cal_state = {
+    "imu_calibrating": False,
+    "imu_samples": [],
+    "imu_start_time": 0.0,
+    "gyro_bias": 0.0,            # subtracted from gyro_z each frame
+    "motor_calibrating": False,
+    "motor_samples": [],
+    "motor_start_time": 0.0,
+    "motor_trim": 0.0,           # added to left, subtracted from right
+}
 
 
 # ──────────────────────────────────────────────
@@ -219,6 +234,28 @@ def handle_toggle_autopilot(data):
     emit("autopilot_state", {"engaged": engage})
 
 
+@socketio.on("calibrate_imu")
+def handle_calibrate_imu():
+    """Start gyro bias calibration — car must be stationary."""
+    log.info("IMU gyro bias calibration requested")
+    with cal_lock:
+        cal_state["imu_calibrating"] = True
+        cal_state["imu_samples"] = []
+        cal_state["imu_start_time"] = time.time()
+    emit("calibration_status", {"type": "imu", "status": "started"})
+
+
+@socketio.on("calibrate_motors")
+def handle_calibrate_motors():
+    """Start open-loop motor drift calibration and draw trace line."""
+    log.info("Motor trim calibration requested")
+    with cal_lock:
+        cal_state["motor_calibrating"] = True
+        cal_state["motor_samples"] = []
+        cal_state["motor_start_time"] = 0.0  # 0.0 means uninitialized
+    emit("calibration_status", {"type": "motors", "status": "started"})
+
+
 @socketio.on("calibrate_floor")
 def handle_calibrate_floor():
     """Capture floor colour profile for obstacle detection."""
@@ -244,6 +281,8 @@ def handle_set_target(data):
         with state_lock:
             state["target"] = world_coords
             state["waypoints"] = []
+            state["initial_waypoints"] = []
+            state["astar_waypoints"] = []
         log.info(f"Target set: pixel=({px:.0f},{py:.0f}) → world=({world_coords[0]:.3f},{world_coords[1]:.3f})m")
         emit("target_confirmed", {
             "world_x": world_coords[0],
@@ -276,7 +315,9 @@ def handle_set_waypoints(data):
 
     with state_lock:
         state["waypoints"] = simplified
+        state["initial_waypoints"] = list(simplified)
         state["target"] = simplified[-1]
+        state["astar_waypoints"] = []
 
     log.info(f"Path set: {len(simplified)} waypoints, final target=({simplified[-1][0]:.3f},{simplified[-1][1]:.3f})m")
     emit("waypoints_confirmed", {
@@ -324,6 +365,11 @@ def control_loop():
     # A* replanning throttle
     last_replan_time = 0.0
 
+    # Heading calibration spin state
+    heading_cal_active = False
+    heading_cal_start_time = 0.0
+    heading_cal_readings = []  # collect velocity_heading samples during spin
+
     while True:
         t_start = time.time()
 
@@ -340,19 +386,41 @@ def control_loop():
             position = (detection["world_x"], detection["world_y"])
             speed = detection.get("speed", 0.0)
 
+        # ── IMU gyro bias calibration ──
+        with cal_lock:
+            imu_calibrating = cal_state["imu_calibrating"]
+            gyro_bias = cal_state["gyro_bias"]
+            motor_calibrating = cal_state["motor_calibrating"]
+            motor_trim = cal_state["motor_trim"]
+
+        if imu_calibrating and imu_data and imu_data.get("gyro_z") is not None:
+            with cal_lock:
+                cal_state["imu_samples"].append(imu_data["gyro_z"])
+                elapsed_cal = t_start - cal_state["imu_start_time"]
+                if elapsed_cal >= 2.0:  # collect for 2 seconds
+                    samples = cal_state["imu_samples"]
+                    cal_state["gyro_bias"] = float(np.mean(samples))
+                    cal_state["imu_calibrating"] = False
+                    gyro_bias = cal_state["gyro_bias"]
+                    log.info(f"IMU calibrated: gyro_z bias = {gyro_bias:.4f}°/s from {len(samples)} samples")
+                    socketio.emit("calibration_status", {
+                        "type": "imu", "status": "done",
+                        "bias": round(gyro_bias, 4)
+                    })
+
         # 4) Fuse heading: IMU primary, CV velocity vector as drift correction
         heading = None
         
-        # Integrate ESP32 Gyro Z for relative heading
+        # Integrate ESP32 Gyro Z for relative heading (with bias correction)
         if imu_data and imu_data.get("gyro_z") is not None:
             dt_imu = t_start - last_yaw_time
-            gz = imu_data["gyro_z"]
+            gz = imu_data["gyro_z"] - gyro_bias  # subtract calibrated bias
             if global_yaw is None:
                 if detection and detection.get("velocity_heading") is not None:
                     global_yaw = detection["velocity_heading"]
                 else:
                     global_yaw = 0.0
-            global_yaw = (global_yaw - gz * dt_imu) % 360  # Subtracting generic CCW gyro mapped to CW heading
+            global_yaw = (global_yaw - gz * dt_imu) % 360
         last_yaw_time = t_start
 
         # Break drift using CV vector
@@ -366,17 +434,65 @@ def control_loop():
                 
         heading = global_yaw
 
+        # ── Motor open-loop trim calibration ──
+        with cal_lock:
+            motor_calibrating = cal_state.get("motor_calibrating", False)
+            
+        if motor_calibrating:
+            with cal_lock:
+                start_t = cal_state.get("motor_start_time", 0.0)
+                if start_t == 0.0:
+                    cal_state["motor_start_time"] = t_start
+                    # Draw a 1.5m straight line forward for visual reference
+                    if position and heading is not None:
+                        import math
+                        rad = math.radians(heading)
+                        target_x = position[0] + math.sin(rad) * 1.5
+                        target_y = position[1] - math.cos(rad) * 1.5
+                        with state_lock:
+                            state["waypoints"] = [position, (target_x, target_y)]
+                            state["target"] = (target_x, target_y)
+                            state["astar_waypoints"] = []
+                        socketio.emit("waypoints_confirmed", {
+                            "count": 2,
+                            "points": [{"x": p[0], "y": p[1]} for p in state["waypoints"]]
+                        })
+                
+                elapsed = t_start - cal_state["motor_start_time"]
+                
+                # Active driving phase
+                if elapsed < 2.5:
+                    if imu_data and imu_data.get("gyro_z") is not None:
+                        cal_state["motor_samples"].append(imu_data["gyro_z"] - gyro_bias)
+                    telem_left, telem_right = 0.7, 0.7
+                    esp32.send_motor_command(0.7, 0.7)
+                else:
+                    esp32.send_motor_command(0.0, 0.0)
+                    cal_state["motor_calibrating"] = False
+                    samples = cal_state["motor_samples"]
+                    if samples:
+                        trim = (sum(samples) / len(samples)) * 0.005
+                        trim = max(-0.15, min(0.15, trim))
+                        cal_state["motor_trim"] = trim
+                        log.info(f"Motors calibrated: trim={trim:.3f}")
+                    else:
+                        trim = cal_state["motor_trim"]
+                    socketio.emit("calibration_status", {
+                         "type": "motors", "status": "done", "trim": round(trim, 3)
+                    })
+
         # 5) Autopilot logic
         telem_left = 0.0
         telem_right = 0.0
 
         with state_lock:
-            ap_engaged = state["autopilot_engaged"]
+            ap_engaged = state["autopilot_engaged"] and not motor_calibrating
             target = state["target"]
             waypoints = list(state["waypoints"])
+            initial_waypoints = list(state["initial_waypoints"])
             astar_waypoints = list(state["astar_waypoints"])
             
-        cv_pipeline.set_nav_data(waypoints, target)
+        cv_pipeline.set_nav_data(waypoints, target, initial_waypoints)
 
         # ── A* obstacle avoidance replanning ──
         # Only replan if: we have no path, OR the current path is blocked
@@ -416,53 +532,108 @@ def control_loop():
         # Determine which waypoints to follow (A* takes priority when available)
         active_waypoints = astar_waypoints if astar_waypoints else waypoints
 
-        if ap_engaged and position is not None and heading is not None and target is not None:
-            # Determine current waypoint target
-            if active_waypoints:
-                current_target = active_waypoints[0]
-                dx = current_target[0] - position[0]
-                dy = current_target[1] - position[1]
-                dist = (dx * dx + dy * dy) ** 0.5
-                # A* waypoints use a larger reach threshold (they're navigation hints, not precision targets)
-                reach = 0.12 if astar_waypoints else Config.WAYPOINT_REACH_THRESHOLD
-                if dist < reach:
-                    # Pop from whichever list is active
-                    if astar_waypoints:
-                        with state_lock:
-                            if state["astar_waypoints"]:
-                                state["astar_waypoints"].pop(0)
-                                if state["astar_waypoints"]:
-                                    current_target = state["astar_waypoints"][0]
-                                else:
-                                    # A* path done — also clear drawn waypoints
-                                    # (A* already incorporated them)
-                                    state["waypoints"] = []
-                                    current_target = target
+        if ap_engaged and position is not None and target is not None:
+            # ── Heading calibration spin ──
+            # On first autopilot engage with unknown heading, do a slow
+            # in-place rotation so the CV pipeline can build up velocity
+            # history and compute a reliable heading.
+            if global_yaw is None and not heading_cal_active:
+                heading_cal_active = True
+                heading_cal_start_time = t_start
+                heading_cal_readings = []
+                log.info("Heading calibration: starting spin...")
+
+            if heading_cal_active:
+                elapsed_cal = t_start - heading_cal_start_time
+
+                # Collect any velocity heading samples
+                if detection and detection.get("velocity_heading") is not None:
+                    heading_cal_readings.append(detection["velocity_heading"])
+
+                # End conditions: got enough readings OR time expired
+                got_readings = len(heading_cal_readings) >= 3
+                timed_out = elapsed_cal >= Config.HEADING_CAL_DURATION
+
+                if got_readings or timed_out:
+                    if heading_cal_readings:
+                        # Use the median of collected headings for robustness
+                        cal_heading = float(np.median(heading_cal_readings))
+                        global_yaw = cal_heading
+                        heading = global_yaw
+                        log.info(f"Heading calibrated: {cal_heading:.1f}° from {len(heading_cal_readings)} samples")
                     else:
-                        with state_lock:
-                            if state["waypoints"]:
+                        global_yaw = 0.0
+                        heading = 0.0
+                        log.warning("Heading calibration timed out with no CV heading — defaulting to 0°")
+
+                    heading_cal_active = False
+                    esp32.send_motor_command(0.0, 0.0)  # stop spin
+                    time.sleep(0.1)  # brief pause before nav starts
+                else:
+                    # Still calibrating — send spin command
+                    spin_spd = Config.HEADING_CAL_SPIN_SPEED
+                    esp32.send_motor_command(-spin_spd, spin_spd)  # in-place CW rotation
+                    telem_left = -spin_spd
+                    telem_right = spin_spd
+
+            elif heading is not None:
+                # Normal autopilot navigation
+                # Determine current waypoint target
+                if active_waypoints:
+                    # ── Dynamic Pruner: drop any raw waypoints the robot has already driven past
+                    with state_lock:
+                        if state["waypoints"]:
+                            wps = state["waypoints"]
+                            d0 = (position[0] - wps[0][0])**2 + (position[1] - wps[0][1])**2
+                            
+                            # If we reached it, or are closer to the next one, pop the stale one
+                            if d0**0.5 < Config.WAYPOINT_REACH_THRESHOLD:
                                 state["waypoints"].pop(0)
+                            elif len(wps) > 1:
+                                d1 = (position[0] - wps[1][0])**2 + (position[1] - wps[1][1])**2
+                                if d1 < d0:
+                                    state["waypoints"].pop(0)
+
+                    current_target = active_waypoints[0]
+                    dx = current_target[0] - position[0]
+                    dy = current_target[1] - position[1]
+                    dist = (dx * dx + dy * dy) ** 0.5
+                    # A* waypoints use a larger reach threshold
+                    reach = 0.16 if astar_waypoints else Config.WAYPOINT_REACH_THRESHOLD
+                    if dist < reach:
+                        if astar_waypoints:
+                            with state_lock:
+                                if state["astar_waypoints"]:
+                                    state["astar_waypoints"].pop(0)
+                                    if state["astar_waypoints"]:
+                                        current_target = state["astar_waypoints"][0]
+                                    else:
+                                        state["waypoints"] = []
+                                        current_target = target
+                        else:
+                            with state_lock:
                                 if state["waypoints"]:
-                                    current_target = state["waypoints"][0]
-                                else:
-                                    current_target = target
-            else:
-                current_target = target
+                                    state["waypoints"].pop(0)
+                                    if state["waypoints"]:
+                                        current_target = state["waypoints"][0]
+                                    else:
+                                        current_target = target
+                else:
+                    current_target = target
 
-            pid_output = autopilot.compute(
-                position=position,
-                heading=heading,
-                target=current_target,
-                dt=loop_rate,
-            )
+                pid_output = autopilot.compute(
+                    position=position,
+                    heading=heading,
+                    target=current_target,
+                    dt=loop_rate,
+                )
 
-            # PID returns signed floats: positive=fwd, negative=rev
-            telem_left = pid_output["left"]
-            telem_right = pid_output["right"]
-            esp32.send_motor_command(telem_left, telem_right)
+                telem_left = pid_output["left"]
+                telem_right = pid_output["right"]
+                esp32.send_motor_command(telem_left, telem_right)
 
         else:
-            if state["manual_command"] is None:
+            if state["manual_command"] is None and not cal_state.get("motor_calibrating", False):
                 esp32.send_motor_command(0.0, 0.0)
 
         # 6) Compute distance to target
@@ -506,6 +677,11 @@ def control_loop():
                 "gyro_x": round(imu_data.get("gyro_x"), 2) if imu_data and imu_data.get("gyro_x") is not None else None,
                 "gyro_y": round(imu_data.get("gyro_y"), 2) if imu_data and imu_data.get("gyro_y") is not None else None,
                 "gyro_z": round(imu_data.get("gyro_z"), 2) if imu_data and imu_data.get("gyro_z") is not None else None,
+            },
+            "cv_metrics": {
+                "cv_fps": round(cv_pipeline.metrics["cv_fps"], 1),
+                "inference_ms": round(cv_pipeline.metrics["inference_ms"], 1),
+                "other_ms": round(cv_pipeline.metrics["other_ms"], 1),
             },
             "fps": current_fps,
             "connection": {
