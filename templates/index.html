@@ -167,7 +167,7 @@
   }
   body.sidebar-hidden .bottom-bar { right: 16px; }
 
-  .bottom-left-tools { display: flex; flex-direction: column; gap: 6px; }
+  .bottom-left-tools { display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: flex-end; max-width: 400px; }
 
   .tool-btn {
     display: flex; align-items: center; gap: 6px;
@@ -364,8 +364,6 @@
 
   <main id="mainArea">
     <div class="video-area" id="videoArea">
-      <!-- Video element for WebRTC or MJPEG fallback -->
-      <video id="videoElement" autoplay playsinline muted></video>
       <img id="mjpegFallback" style="display:none; width:100%; height:100%; object-fit:contain;" />
       <div class="video-placeholder-text" id="videoPlaceholder">Connecting to video feed...</div>
     </div>
@@ -389,6 +387,26 @@
 
     <div class="bottom-bar">
       <div class="bottom-left-tools">
+        <button class="tool-btn" id="calibFloorBtn">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2" width="12" height="12" rx="2"/>
+            <path d="M5 8h6"/><path d="M8 5v6"/>
+          </svg>
+          Calibrate floor
+        </button>
+        <button class="tool-btn" id="calibIMUBtn" title="Calibrate gyro bias (keep car still)">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="8" cy="8" r="6"/>
+            <path d="M8 4v4l3 2"/>
+          </svg>
+          Calibrate IMU
+        </button>
+        <button class="tool-btn" id="calibMotorBtn" title="Auto-calibrate motor trim (car will drive forward)">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 8h12"/><path d="M10 4l4 4-4 4"/>
+          </svg>
+          Calibrate motors
+        </button>
         <button class="tool-btn" id="drawPathBtn">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M2 12 C4 8, 6 4, 8 6 S12 12, 14 4"/>
@@ -530,12 +548,43 @@
           </div>
         </div>
       </div>
+      <div class="panel">
+        <div class="panel-title">Obstacle Avoidance</div>
+        <div class="telem-grid">
+          <div class="telem-item">
+            <div class="telem-item-label">Floor Calibrated</div>
+            <div class="telem-item-value" id="obstCalibrated" style="font-size:13px">No</div>
+          </div>
+          <div class="telem-item">
+            <div class="telem-item-label">Obstacle Cells</div>
+            <div class="telem-item-value" id="obstCount" style="font-size:13px">0</div>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Computer Vision Timing</div>
+        <div class="telem-grid" style="grid-template-columns:1fr 1fr 1fr;gap:6px">
+          <div class="telem-item">
+            <div class="telem-item-label">App FPS</div>
+            <div class="telem-item-value" id="appFpsVal" style="font-size:13px">—</div>
+          </div>
+          <div class="telem-item">
+            <div class="telem-item-label">Inference</div>
+            <div class="telem-item-value" id="inferenceVal" style="font-size:13px">—<span class="telem-item-unit">ms</span></div>
+          </div>
+          <div class="telem-item">
+            <div class="telem-item-label">Other</div>
+            <div class="telem-item-value" id="otherMsVal" style="font-size:13px">—<span class="telem-item-unit">ms</span></div>
+          </div>
+        </div>
+      </div>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-footer">
         <div class="shortcut-row"><span class="shortcut-action">Drive</span><span class="shortcut-keys">W A S D</span></div>
         <div class="shortcut-row"><span class="shortcut-action">Autopilot</span><span class="shortcut-keys">Space</span></div>
         <div class="shortcut-row"><span class="shortcut-action">Set target</span><span class="shortcut-keys">T</span></div>
         <div class="shortcut-row"><span class="shortcut-action">Draw path</span><span class="shortcut-keys">P</span></div>
+        <div class="shortcut-row"><span class="shortcut-action">Calibrate</span><span class="shortcut-keys">C</span></div>
         <div class="shortcut-row"><span class="shortcut-action">Stop</span><span class="shortcut-keys">Esc</span></div>
       </div>
     </div>
@@ -559,8 +608,8 @@ let webrtcConnected = false;
 
 // Drive state
 const keys = { w: false, a: false, s: false, d: false };
-const DRIVE_POWER = 0.65;
-const TURN_POWER = 0.50;
+const DRIVE_POWER = 1.0;
+const TURN_POWER = 0.85;
 let driveInterval = null;
 
 // Draw state
@@ -588,83 +637,15 @@ function toast(message, type = 'info') {
 }
 
 // ═══════════════════════════════════════════════════════
-// VIDEO — WebRTC with MJPEG fallback
+// VIDEO — MJPEG Stream
 // ═══════════════════════════════════════════════════════
 
-async function initWebRTC() {
-  try {
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    });
-
-    pc.addTransceiver('video', { direction: 'recvonly' });
-
-    pc.ontrack = (event) => {
-      const video = $('videoElement');
-      video.srcObject = event.streams[0];
-      video.style.display = 'block';
-      $('videoPlaceholder').style.display = 'none';
-      webrtcConnected = true;
-      console.log('[WebRTC] Video track received');
-    };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('webrtc_ice_candidate', {
-          candidate: event.candidate.candidate,
-          sdpMid: event.candidate.sdpMid,
-          sdpMLineIndex: event.candidate.sdpMLineIndex,
-        });
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log(`[WebRTC] State: ${pc.connectionState}`);
-      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        webrtcConnected = false;
-        fallbackToMJPEG();
-      }
-    };
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    socket.emit('webrtc_offer', {
-      sdp: pc.localDescription.sdp,
-      type: pc.localDescription.type,
-    });
-
-    socket.on('webrtc_answer', async (data) => {
-      await pc.setRemoteDescription(new RTCSessionDescription(data));
-      console.log('[WebRTC] Answer received, connection establishing...');
-    });
-
-    socket.on('webrtc_error', (data) => {
-      console.warn('[WebRTC] Error:', data.error);
-      fallbackToMJPEG();
-    });
-
-    // Timeout: if no video in 5s, fall back
-    setTimeout(() => {
-      if (!webrtcConnected) fallbackToMJPEG();
-    }, 5000);
-
-  } catch (e) {
-    console.error('[WebRTC] Init failed:', e);
-    fallbackToMJPEG();
-  }
-}
-
-function fallbackToMJPEG() {
-  if (webrtcConnected) return;
-  console.log('[Video] Falling back to MJPEG');
-  const video = $('videoElement');
-  video.style.display = 'none';
+function initVideo() {
   const img = $('mjpegFallback');
   img.src = '/video_feed';
   img.style.display = 'block';
   $('videoPlaceholder').style.display = 'none';
-  toast('Using MJPEG fallback (WebRTC unavailable)', 'info');
+  console.log('[Video] Started MJPEG stream');
 }
 
 // ═══════════════════════════════════════════════════════
@@ -724,8 +705,13 @@ socket.on('telemetry', (data) => {
     errorFill.style.width = (Math.abs(errorNorm) * 50) + '%';
   }
 
-  // FPS
-  $('fpsDisplay').textContent = `${data.fps} fps`;
+  // FPS and Timing
+  $('fpsDisplay').textContent = `${data.cv_metrics ? parseFloat(data.cv_metrics.cv_fps).toFixed(0) : data.fps} fps`;
+  $('appFpsVal').textContent = `${data.fps}`;
+  if (data.cv_metrics) {
+    $('inferenceVal').innerHTML = `${data.cv_metrics.inference_ms.toFixed(1)}<span class="telem-item-unit">ms</span>`;
+    $('otherMsVal').innerHTML = `${data.cv_metrics.other_ms.toFixed(1)}<span class="telem-item-unit">ms</span>`;
+  }
 
   // Connection status
   $('connESP32').className = 'conn-dot' + (data.connection.esp32 ? ' ok' : '');
@@ -747,6 +733,13 @@ socket.on('telemetry', (data) => {
     autopilotEngaged = data.autopilot;
     updateAutopilotUI();
   }
+
+  // Obstacle avoidance
+  if (data.obstacles) {
+    $('obstCalibrated').textContent = data.obstacles.calibrated ? 'Yes' : 'No';
+    $('obstCalibrated').style.color = data.obstacles.calibrated ? 'var(--green)' : 'var(--text-tertiary)';
+    $('obstCount').textContent = data.obstacles.count;
+  }
 });
 
 socket.on('connection_status', (data) => {
@@ -761,7 +754,7 @@ socket.on('error', (data) => {
 
 socket.on('connect', () => {
   toast('Connected to ground station', 'success');
-  initWebRTC();
+  initVideo();
 });
 
 socket.on('disconnect', () => {
@@ -851,6 +844,7 @@ document.addEventListener('keydown', (e) => {
   // Drive keys
   if (['w', 'a', 's', 'd'].includes(k) && !autopilotEngaged) {
     e.preventDefault();
+    if (e.repeat) return; // Ignore synthetic repeats on Linux
     if (!keys[k]) {
       keys[k] = true;
       updateDriveIndicator();
@@ -867,20 +861,29 @@ document.addEventListener('keydown', (e) => {
   if (k === ' ') { e.preventDefault(); toggleAutopilot(); }
   if (k === 't') toggleTarget();
   if (k === 'p') toggleDraw();
+  if (k === 'c') calibrateFloor();
   if (k === 'escape') emergencyStop();
 });
+
+let keyupTimeout = null;
 
 document.addEventListener('keyup', (e) => {
   const k = e.key.toLowerCase();
   if (['w', 'a', 's', 'd'].includes(k)) {
+    // Treat as false initially to update visuals
     keys[k] = false;
     updateDriveIndicator();
-    const anyKey = keys.w || keys.a || keys.s || keys.d;
-    if (!anyKey && driveInterval) {
-      clearInterval(driveInterval);
-      driveInterval = null;
-      socket.emit('manual_stop');
-    }
+    
+    // Debounce the actual stop command to filter out synthetic Linux keyup/keydown bounces
+    if (keyupTimeout) clearTimeout(keyupTimeout);
+    keyupTimeout = setTimeout(() => {
+      const anyKey = keys.w || keys.a || keys.s || keys.d;
+      if (!anyKey && driveInterval) {
+        clearInterval(driveInterval);
+        driveInterval = null;
+        socket.emit('manual_stop');
+      }
+    }, 30);
   }
 });
 
@@ -924,6 +927,88 @@ function updateAutopilotUI() {
 $('apToggle').addEventListener('click', toggleAutopilot);
 
 // ═══════════════════════════════════════════════════════
+// FLOOR CALIBRATION
+// ═══════════════════════════════════════════════════════
+
+function calibrateFloor() {
+  $('calibFloorBtn').classList.add('active');
+  toast('Calibrating floor colour...', 'info');
+  socket.emit('calibrate_floor');
+}
+
+$('calibFloorBtn').addEventListener('click', calibrateFloor);
+
+socket.on('floor_calibration_status', (data) => {
+  $('calibFloorBtn').classList.remove('active');
+  if (data.success) {
+    toast('Floor colour calibrated — obstacle detection active', 'success');
+  } else {
+    toast('Floor calibration failed — ensure camera is active', 'error');
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// IMU & MOTOR CALIBRATION
+// ═══════════════════════════════════════════════════════
+
+$('calibIMUBtn').addEventListener('click', () => {
+  $('calibIMUBtn').classList.add('active');
+  toast('Calibrating IMU gyro bias — keep car still...', 'info');
+  socket.emit('calibrate_imu');
+});
+
+$('calibMotorBtn').addEventListener('click', () => {
+  $('calibMotorBtn').classList.add('active');
+  toast('Calibrating motors — car will drive forward...', 'info');
+  socket.emit('calibrate_motors');
+});
+
+socket.on('calibration_status', (data) => {
+  if (data.type === 'imu') {
+    $('calibIMUBtn').classList.remove('active');
+    if (data.status === 'done') {
+      toast(`IMU calibrated: gyro bias = ${data.bias}°/s`, 'success');
+    }
+  } else if (data.type === 'motors') {
+    $('calibMotorBtn').classList.remove('active');
+    if (data.status === 'done') {
+      toast(`Motors calibrated: trim = ${data.trim}`, 'success');
+    }
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// CORE COORDINATE MAPPING
+// ═══════════════════════════════════════════════════════
+function getNativeVideoCoords(clientX, clientY) {
+  const container = $('mainArea').getBoundingClientRect();
+  const screenX = clientX - container.left;
+  const screenY = clientY - container.top;
+
+  const img = $('mjpegFallback');
+  const rect = img.getBoundingClientRect();
+
+  // Native config resolution
+  const nw = 640; 
+  const nh = 480;
+
+  const ratio = Math.min(rect.width / nw, rect.height / nh);
+  const renderW = nw * ratio;
+  const renderH = nh * ratio;
+
+  const offsetX = rect.left + (rect.width - renderW) / 2;
+  const offsetY = rect.top + (rect.height - renderH) / 2;
+
+  let px = (clientX - offsetX) / ratio;
+  let py = (clientY - offsetY) / ratio;
+
+  px = Math.max(0, Math.min(nw, px));
+  py = Math.max(0, Math.min(nh, py));
+
+  return { px, py, screenX, screenY };
+}
+
+// ═══════════════════════════════════════════════════════
 // SET TARGET
 // ═══════════════════════════════════════════════════════
 
@@ -943,9 +1028,7 @@ $('targetBtn').addEventListener('click', toggleTarget);
 $('videoArea').addEventListener('click', (e) => {
   if (!targetActive) return;
 
-  const rect = $('mainArea').getBoundingClientRect();
-  const px = e.clientX - rect.left;
-  const py = e.clientY - rect.top;
+  const coords = getNativeVideoCoords(e.clientX, e.clientY);
 
   // Remove old marker
   if (targetMarker) targetMarker.remove();
@@ -959,13 +1042,13 @@ $('videoArea').addEventListener('click', (e) => {
     <path d="M69 31 L69 41 L56 41" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M16 41 L3 41 L3 31" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>`;
-  marker.style.left = px + 'px';
-  marker.style.top = py + 'px';
+  marker.style.left = coords.screenX + 'px';
+  marker.style.top = coords.screenY + 'px';
   $('mainArea').appendChild(marker);
   targetMarker = marker;
 
   // Send to backend
-  socket.emit('set_target', { px, py });
+  socket.emit('set_target', { px: coords.px, py: coords.py });
   toggleTarget();
 });
 
@@ -1000,18 +1083,18 @@ canvas.addEventListener('mousedown', (e) => {
   if (!drawActive) return;
   isDrawing = true;
   pathPoints = [];
-  const rect = canvas.getBoundingClientRect();
-  pathPoints.push({ px: e.clientX - rect.left, py: e.clientY - rect.top });
-  drawnPath.setAttribute('d', `M ${pathPoints[0].px} ${pathPoints[0].py}`);
+  const coords = getNativeVideoCoords(e.clientX, e.clientY);
+  pathPoints.push(coords);
+  drawnPath.setAttribute('d', `M ${coords.screenX} ${coords.screenY}`);
 });
 
 canvas.addEventListener('mousemove', (e) => {
   if (!isDrawing) return;
-  const rect = canvas.getBoundingClientRect();
-  pathPoints.push({ px: e.clientX - rect.left, py: e.clientY - rect.top });
-  let d = `M ${pathPoints[0].px} ${pathPoints[0].py}`;
+  const coords = getNativeVideoCoords(e.clientX, e.clientY);
+  pathPoints.push(coords);
+  let d = `M ${pathPoints[0].screenX} ${pathPoints[0].screenY}`;
   for (let i = 1; i < pathPoints.length; i++) {
-    d += ` L ${pathPoints[i].px} ${pathPoints[i].py}`;
+    d += ` L ${pathPoints[i].screenX} ${pathPoints[i].screenY}`;
   }
   drawnPath.setAttribute('d', d);
 });
