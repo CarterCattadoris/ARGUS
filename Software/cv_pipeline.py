@@ -133,7 +133,7 @@ class CVPipeline:
         """Load YOLOv11n model via Ultralytics."""
         try:
             from ultralytics import YOLO
-            self._model = YOLO(self.model_path)
+            self._model = YOLO(self.model_path, task="detect")
             log.info(f"YOLO model loaded: {self.model_path}")
         except FileNotFoundError:
             log.warning(f"Model not found at {self.model_path} — detection disabled")
